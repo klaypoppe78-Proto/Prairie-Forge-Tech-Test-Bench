@@ -51,20 +51,14 @@ class MainActivity : ComponentActivity() {
             // Location permission launcher for Android GPS fallback
             val locationPermissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions()
-            ) { permissions ->
-                val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                        permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-                if (granted) {
-                    viewModel.setGnssSource(GnssSourceMode.ANDROID_GPS)
-                }
+            ) { _ ->
+                // Location permissions granted for GPS / GNSS access when user enables Android GPS mode
             }
 
             LaunchedEffect(Unit) {
                 val fineLocation = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION)
                 val coarseLocation = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_COARSE_LOCATION)
-                if (fineLocation == PackageManager.PERMISSION_GRANTED || coarseLocation == PackageManager.PERMISSION_GRANTED) {
-                    viewModel.setGnssSource(GnssSourceMode.ANDROID_GPS)
-                } else {
+                if (fineLocation != PackageManager.PERMISSION_GRANTED && coarseLocation != PackageManager.PERMISSION_GRANTED) {
                     locationPermissionLauncher.launch(
                         arrayOf(
                             Manifest.permission.ACCESS_FINE_LOCATION,

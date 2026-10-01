@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -499,7 +500,7 @@ private fun WasDiagnosticsTab(
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Default.Send, contentDescription = null)
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("SEND PGN 252 SETTINGS TO TEENSY")
                 }

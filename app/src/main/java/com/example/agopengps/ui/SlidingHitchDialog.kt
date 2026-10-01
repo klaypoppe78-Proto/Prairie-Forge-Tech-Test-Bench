@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -85,7 +86,7 @@ fun SlidingHitchDialog(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                Icons.Default.CompareArrows,
+                                Icons.AutoMirrored.Filled.CompareArrows,
                                 contentDescription = null,
                                 tint = Color(0xFF00E5FF),
                                 modifier = Modifier.size(24.dp)

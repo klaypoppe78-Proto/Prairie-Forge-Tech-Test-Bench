@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -188,13 +189,13 @@ fun NmeaDiagnosticsDialog(
                         selected = selectedTab == NmeaTab.TROUBLESHOOTING_GUIDE,
                         onClick = { selectedTab = NmeaTab.TROUBLESHOOTING_GUIDE },
                         text = { Text("FIELD GUIDE & FIXES", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
-                        icon = { Icon(Icons.Default.HelpOutline, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        icon = { Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = null, modifier = Modifier.size(16.dp)) }
                     )
                     Tab(
                         selected = selectedTab == NmeaTab.COMMAND_TRANSMIT,
                         onClick = { selectedTab = NmeaTab.COMMAND_TRANSMIT },
                         text = { Text("COMMAND SENDER", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
-                        icon = { Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp)) }
                     )
                 }
 
@@ -1008,7 +1009,7 @@ private fun CommandSenderTab(
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00C853)),
                             modifier = Modifier.height(52.dp)
                         ) {
-                            Icon(Icons.Default.Send, contentDescription = null)
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("SEND", fontWeight = FontWeight.Bold)
                         }

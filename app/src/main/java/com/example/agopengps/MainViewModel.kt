@@ -1973,10 +1973,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun processAndroidLocation(loc: Location, isInitialFix: Boolean = false) {
+        if (_uiState.value.gnssSource != GnssSourceMode.ANDROID_GPS) return
         val rawGeo = GeoPoint(loc.latitude, loc.longitude, loc.altitude)
 
-        // Automatically anchor field datum to tablet GPS upon receiving first fix
-        if (!hasInitializedTabletOrigin) {
+        // Automatically anchor field datum to tablet GPS upon receiving first fix only if no field is loaded
+        if (!hasInitializedTabletOrigin && _uiState.value.currentField == null) {
             hasInitializedTabletOrigin = true
             setManualFarmLocation(rawGeo.latitude, rawGeo.longitude, rawGeo.altitude, "Tablet GPS Field")
         }
@@ -2231,7 +2232,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Register tablet IMU rotation vector sensor & accelerometer
             sensorManager = ctx.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
             val rotSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-                ?: sensorManager?.getDefaultSensor(Sensor.TYPE_ORIENTATION)
+                ?: sensorManager?.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
             val accel = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
             sensorEventListener = object : SensorEventListener {
@@ -3016,7 +3017,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun vibrateHaptic(durationMs: Long) {
         try {
-            val vibrator = getApplication<Application>().getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                val vm = getApplication<Application>().getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                vm?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getApplication<Application>().getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
             vibrator?.let {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     it.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))

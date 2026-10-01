@@ -12,7 +12,7 @@ plugins {
 }
 
 android {
-  namespace = "com.aistudio.agopengps.rktxq"
+  namespace = "com.example"
   compileSdk = 35
 
   defaultConfig {

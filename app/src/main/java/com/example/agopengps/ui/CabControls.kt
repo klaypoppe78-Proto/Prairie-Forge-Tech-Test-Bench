@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -725,7 +726,7 @@ fun CabControls(
                             onClick = { showToolsSheet = false; onOpenImplementPresetsDialog() }
                         )
                         ModernToolCard(
-                            icon = Icons.Default.CompareArrows,
+                            icon = Icons.AutoMirrored.Filled.CompareArrows,
                             title = "Sliding Hitch",
                             subtitle = "Implement steering",
                             accentColor = Color(0xFF06B6D4),

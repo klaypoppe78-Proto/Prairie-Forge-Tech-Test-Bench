@@ -30,7 +30,7 @@ abstract class AgOpenGpsDatabase : RoomDatabase() {
                     context.applicationContext,
                     AgOpenGpsDatabase::class.java,
                     "agopengps_database.db"
-                ).fallbackToDestructiveMigration().build()
+                ).fallbackToDestructiveMigration(dropAllTables = true).build()
                 INSTANCE = instance
                 instance
             }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -47,7 +48,7 @@ enum class WizardGuidanceMode(val title: String, val subtitle: String, val icon:
     SET_AB_DRIVE("Straight A-B Line (Drive)", "Point A sets now at vehicle; drive 50+ ft and press 'Set Point B'", Icons.Default.Timeline),
     A_PLUS_HEADING("A+ Heading Line (Instant)", "Point A sets now + lock in chosen compass heading (090° E-W, 000° N-S)", Icons.Default.Explore),
     ADAPTIVE_CURVE("Adaptive Curve Recording", "Record dynamic contour swaths along waterways or terraces", Icons.Default.Gesture),
-    COPY_EXISTING("Parallel to Section Road", "Align swath exactly parallel to 176th Street / East-West baseline", Icons.Default.AltRoute)
+    COPY_EXISTING("Parallel to Section Road", "Align swath exactly parallel to 176th Street / East-West baseline", Icons.AutoMirrored.Filled.AltRoute)
 }
 
 enum class WizardImplementMode {
@@ -848,7 +849,7 @@ fun FieldSetupWizardDialog(
                             onClick = { step-- },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = null)
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("BACK", color = Color.White)
                         }
@@ -871,7 +872,7 @@ fun FieldSetupWizardDialog(
                         ) {
                             Text("NEXT STEP", color = Color.Black, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = Color.Black)
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = Color.Black)
                         }
                     } else {
                         Button(

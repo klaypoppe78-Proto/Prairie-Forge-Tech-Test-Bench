@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -754,7 +755,7 @@ fun OperatorDashboardOverlay(
                 ) {
                     Column {
                         Spacer(modifier = Modifier.height(10.dp))
-                        Divider(color = Color(0xFF263238), thickness = 1.dp)
+                        HorizontalDivider(color = Color(0xFF263238), thickness = 1.dp)
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Text(
@@ -812,7 +813,7 @@ fun OperatorDashboardOverlay(
 
                             // 4. Sliding Hitch
                             SubmenuLaunchCard(
-                                icon = Icons.Default.CompareArrows,
+                                icon = Icons.AutoMirrored.Filled.CompareArrows,
                                 title = "SLIDING HITCH",
                                 subtitle = "Implement Steer",
                                 color = Color(0xFF006064),
