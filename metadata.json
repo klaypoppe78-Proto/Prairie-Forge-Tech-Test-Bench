@@ -1,0 +1,6 @@
+{
+  "name": "AgOpenGPS",
+  "description": "Native Android tractor auto-steer guidance system with Stanley & Pure Pursuit navigation, AB lines, section control, and RTK/NMEA UDP connectivity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
