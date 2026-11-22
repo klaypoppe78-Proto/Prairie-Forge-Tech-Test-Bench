@@ -44,7 +44,8 @@ enum class GnssSourceMode {
 enum class GuidanceMode {
     AB_LINE,
     A_PLUS,
-    CONTOUR_CURVE
+    CONTOUR_CURVE,
+    EXACT_PATH_MEMORY
 }
 
 enum class CameraViewMode {
@@ -79,12 +80,13 @@ data class AgUiState(
     val workedAcres: Double = 0.0,
     val isNightMode: Boolean = true,
     val themeMode: DisplayThemeMode = DisplayThemeMode.STANDARD_AG,
-    val showSatelliteOverlay: Boolean = true,
+    val showSatelliteOverlay: Boolean = false,
     val satelliteMapProvider: MapTileProvider = MapTileProvider.ESRI_WORLD_TOPO,
     val isHeadUpMode: Boolean = true,
     val mapZoom: Float = 1.0f,
     val gnssSource: GnssSourceMode = GnssSourceMode.SIMULATOR,
     val tempPointA: Vec2? = null,
+    val abTrackTrail: List<Vec2> = emptyList(),
     val isSettingAB: Boolean = false,
     val obstacles: List<FieldObstacle> = emptyList(),
     val activeObstacleAlert: FieldObstacle? = null,
@@ -109,6 +111,7 @@ data class AgUiState(
     val showFieldWizardDialog: Boolean = false,
     val showFormFieldFromAbDialog: Boolean = false,
     val showOuterBoundaryCornersDialog: Boolean = false,
+    val showDeletePathConfirmDialog: Boolean = false,
     val capturedCorners: List<Vec2> = emptyList(),
     val slidingHitchConfig: SlidingHitchConfig = SlidingHitchConfig(),
     val slidingHitchState: SlidingHitchState = SlidingHitchState(),
@@ -126,7 +129,55 @@ data class AgUiState(
     val currentTerrainSquare: TerrainSquare? = null,
     val currentTerrainAttitude: TerrainAttitude = TerrainAttitude(),
     val lastNavigationOutput: NavigationOutput? = null,
-    val statusMessage: String = "AgSteer Ready"
+
+    // Path Memory Recall & Exact Track Replay
+    val isRecordingPath: Boolean = false,
+    val currentRecordingPathName: String = "",
+    val currentRecordingRowCount: Int = 24,
+    val currentRecordingRowSpacingInches: Double = 22.0,
+    val currentRecordingPathPoints: List<PathPoint> = emptyList(),
+    val savedRecordedPaths: List<RecordedPath> = emptyList(),
+    val activeRecallPath: RecordedPath? = null,
+    val activeCultivatorSplitPass: CultivatorSplitPass = CultivatorSplitPass.PASS_A_LEFT,
+    val cultivatorKnifeOffsetInches: Double = 0.0,
+    val splitCultivatorLineA: ABLine? = null,
+    val splitCultivatorLineB: ABLine? = null,
+
+    // Hydraulic SCV & 3-Point Hitch Trigger Mapping Engine
+    val threePointConfig: ThreePointHitchConfig = ThreePointHitchConfig(),
+    val scvValves: List<ScvValve> = HydraulicDefaults.createDefaultValves(),
+    val triggerBindings: List<TriggerBinding> = HydraulicDefaults.createDefaultTriggerBindings(),
+    val showScvHitchWizard: Boolean = false,
+
+    // Gamepad / PS4 Controller Bindings
+    val gamepadBindings: List<GamepadBinding> = emptyList(),
+    val lastPressedGamepadButton: GamepadButton? = null,
+
+    // New Dialog Visibilities
+    val showPathMemoryDialog: Boolean = false,
+    val showCultivatorSplitDialog: Boolean = false,
+    val showGamepadWizardDialog: Boolean = false,
+    val showUsbBackupSyncDialog: Boolean = false,
+    val showSteerAggressionDialog: Boolean = false,
+    val isOperatorOverrideAlertVisible: Boolean = false,
+    val operatorOverrideReason: String = "",
+
+    val statusMessage: String = "Sentinel Guidance Ready"
+)
+
+data class LiveTelemetryState(
+    val vehicleState: VehicleState = VehicleState(),
+    val slidingHitchState: SlidingHitchState = SlidingHitchState(),
+    val uTurnPath: List<Vec2> = emptyList(),
+    val activeObstacleAlert: FieldObstacle? = null,
+    val headlandTurnInfo: HeadlandTurnInfo = HeadlandTurnInfo(),
+    val currentTerrainSquare: TerrainSquare? = null,
+    val currentTerrainAttitude: TerrainAttitude = TerrainAttitude(),
+    val lastNavigationOutput: NavigationOutput? = null,
+    val abTrackTrail: List<Vec2> = emptyList(),
+    val workedAcres: Double = 0.0,
+    val coverageVersion: Long = 0L,
+    val appliedSegmentsCount: Int = 0
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -136,6 +187,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(AgUiState())
     val uiState = _uiState.asStateFlow()
+
+    private val _liveTelemetry = MutableStateFlow(LiveTelemetryState())
+    val liveTelemetry = _liveTelemetry.asStateFlow()
 
     private val simulator = SimulatorEngine()
     val udpManager = AgUdpManager()
@@ -193,6 +247,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastHardwareGpsFixTimeMs: Long = 0L
     private var latestHardwareSteerAngle: Double = 0.0
     val coverageSpatialGrid = CoverageSpatialGrid(cellSizeMeters = 15.0)
+    val coverageChunkStore = CoverageChunkStore(chunkSizeMeters = 60.0)
+
+    // Pre-allocated scratch objects for zero-allocation 20 Hz hot loop
+    private val utcTimeFormat = java.text.SimpleDateFormat("HHmmss.ss", Locale.US).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
+    private val utcDateFormat = java.text.SimpleDateFormat("yyyyMMdd", Locale.US).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
+    private val scratchDate = java.util.Date()
+    private val abTrackTrailBuffer = ArrayList<Vec2>(256)
+    @Volatile
+    private var isLoopPaused: Boolean = false
+
+    fun getAllAppliedSegmentsSnapshot(): List<AppliedSwathSegment> = coverageChunkStore.snapshotAllSegments()
+
+    fun onAppPause() {
+        isLoopPaused = true
+        simJob?.cancel()
+        simJob = null
+        topographyRepo.cancelPendingFetches()
+        if (_uiState.value.gnssSource == GnssSourceMode.ANDROID_GPS) {
+            stopAndroidLocationUpdates()
+        }
+    }
+
+    fun onAppResume() {
+        if (!isLoopPaused) return
+        isLoopPaused = false
+        startNavigationLoop()
+        if (_uiState.value.gnssSource == GnssSourceMode.ANDROID_GPS) {
+            startAndroidLocationUpdates()
+        }
+    }
 
     init {
         // Initialize default sample field & baseline AB line
@@ -273,6 +361,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        // Observe Saved Recorded Paths from Database
+        viewModelScope.launch {
+            repository.getAllRecordedPaths().collect { entities ->
+                val paths = entities.map { ent ->
+                    RecordedPath.fromJson(
+                        id = ent.id,
+                        name = ent.name,
+                        fieldId = ent.fieldId,
+                        json = ent.pointsJson,
+                        totalDist = ent.totalDistanceMeters,
+                        rowCount = ent.rowCount,
+                        rowSpacingInches = ent.rowSpacingInches,
+                        isPlanter = ent.isPlanterTrack,
+                        createdAt = ent.createdAt
+                    )
+                }
+                _uiState.update { it.copy(savedRecordedPaths = paths) }
+            }
+        }
+
+        // Observe Gamepad Bindings from Database
+        viewModelScope.launch {
+            repository.getAllGamepadBindings().collect { entities ->
+                if (entities.isEmpty()) {
+                    // Seed Default PS4 Bindings
+                    val defaults = GamepadProfileFactory.createDefaultPs4Bindings()
+                    val dbEntities = defaults.map { b ->
+                        GamepadBindingEntity(
+                            buttonCode = b.button.code,
+                            actionCode = b.action.code,
+                            label = b.displayLabel,
+                            isCustom = b.isCustom
+                        )
+                    }
+                    repository.saveGamepadBindings(dbEntities)
+                    _uiState.update { it.copy(gamepadBindings = defaults) }
+                } else {
+                    val bindings = entities.mapNotNull { ent ->
+                        val btn = GamepadButton.fromCode(ent.buttonCode) ?: return@mapNotNull null
+                        val act = AgAction.fromCode(ent.actionCode) ?: return@mapNotNull null
+                        GamepadBinding(
+                            id = ent.id,
+                            button = btn,
+                            action = act,
+                            customLabel = ent.label,
+                            isCustom = ent.isCustom
+                        )
+                    }
+                    _uiState.update { it.copy(gamepadBindings = bindings) }
+                }
+            }
+        }
+
         // Start high-frequency 20Hz (50ms) simulation & guidance loop
         startNavigationLoop()
     }
@@ -329,7 +470,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentABLine = defaultAB,
                 vehicleConfig = nh8870Config,
                 steerValveConfig = nh8870Valve,
-                showSatelliteOverlay = true,
+                showSatelliteOverlay = false,
                 satelliteMapProvider = MapTileProvider.ESRI_WORLD_TOPO,
                 showTopographyMap = true,
                 show3DTerrainMesh = true,
@@ -358,6 +499,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 statusMessage = "Loaded Home Farm: 4367 176th St, Lac qui Parle Co, MN (160 Ac, USGS Topo Active)"
             )
         }
+        coverageChunkStore.clear()
+        _liveTelemetry.update {
+            it.copy(
+                vehicleState = _uiState.value.vehicleState,
+                workedAcres = 0.0,
+                coverageVersion = coverageChunkStore.version,
+                appliedSegmentsCount = 0
+            )
+        }
     }
 
     private fun startNavigationLoop() {
@@ -375,7 +525,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 updateGuidanceAndKinematics(dtSec)
 
                 val workTimeMs = (System.nanoTime() - currentTimeNanos) / 1_000_000L
-                // Standard AgIO / AgOpenGPS 20 Hz update frequency (50 ms) to prevent Compose main-thread starvation
+                // Standard AgIO / AgSteer 20 Hz update frequency (50 ms) to prevent Compose main-thread starvation
                 val targetIntervalMs = 50L
                 val sleepTime = max(1L, targetIntervalMs - workTimeMs)
                 delay(sleepTime)
@@ -385,6 +535,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateGuidanceAndKinematics(dtSec: Double) {
         val state = _uiState.value
+        val live = _liveTelemetry.value
+        val liveVehicle = live.vehicleState
+        val isAutoSteerEngaged = state.vehicleState.isAutoSteerEngaged
         val vehicle = state.vehicleConfig
         val settings = state.guidanceSettings
         val implement = state.implementConfig
@@ -392,15 +545,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val curveLine = state.currentCurveLine
         val mode = state.guidanceMode
 
-        var heading = state.vehicleState.headingDeg
-        var speed = state.vehicleState.speedKmh
-        var roll = state.vehicleState.rollDeg
+        var heading = liveVehicle.headingDeg
+        var speed = liveVehicle.speedKmh
+        var roll = liveVehicle.rollDeg
 
         if (state.gnssSource == GnssSourceMode.SIMULATOR) {
             simulator.update(
                 dtSec = dtSec,
-                targetSteerAngleDeg = state.vehicleState.targetSteerAngleDeg,
-                isAutoSteerEngaged = state.vehicleState.isAutoSteerEngaged,
+                targetSteerAngleDeg = liveVehicle.targetSteerAngleDeg,
+                isAutoSteerEngaged = isAutoSteerEngaged,
                 vehicle = vehicle
             )
             rawLocalAntennaPos = simulator.localPivot
@@ -497,8 +650,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var uTurnPath: List<Vec2> = emptyList()
         var headlandTurnInfo = HeadlandTurnInfo()
 
-        // Guidance Tracking calculation (AB / A+ Line or Curve Line)
-        if (mode == GuidanceMode.CONTOUR_CURVE && curveLine != null && curveLine.points.size >= 2) {
+        // Record exact path breadcrumbs during planting / fieldwork
+        if (state.isRecordingPath && speed >= 0.2) {
+            val pts = state.currentRecordingPathPoints
+            val lastPt = pts.lastOrNull()
+            val distFromLast = if (lastPt != null) compensatedPivot.distanceTo(lastPt.toVec2()) else 999.0
+            if (distFromLast >= 0.40) { // Record every 40cm
+                val newPt = PathPoint(
+                    localX = compensatedPivot.x,
+                    localY = compensatedPivot.y,
+                    headingDeg = heading,
+                    speedKmh = speed,
+                    timestamp = System.currentTimeMillis()
+                )
+                _uiState.update { it.copy(currentRecordingPathPoints = it.currentRecordingPathPoints + newPt) }
+            }
+        }
+
+        // Guidance Tracking calculation (Exact Memory Path, AB / A+ Line, or Curve Line)
+        if (mode == GuidanceMode.EXACT_PATH_MEMORY && state.activeRecallPath != null && state.activeRecallPath.points.size >= 2) {
+            val pathTracking = CultivatorSplittingEngine.calculatePathTracking(
+                pivotPosition = compensatedPivot,
+                tractorHeadingDeg = heading,
+                pathPoints = state.activeRecallPath.points,
+                lookaheadDistanceMeters = (settings.purePursuitLookaheadGain * max(speed / 3.6, 1.0)).coerceIn(2.0, 8.0)
+            )
+            crossTrackError = pathTracking.crossTrackErrorMeters
+            val angleDiff = GeoUtils.normalizeAngleDeg(pathTracking.targetSteerHeadingDeg - heading)
+            headingError = angleDiff
+
+            targetSteerAngle = GuidanceAlgorithms.calculateStanleySteering(
+                crossTrackErrorMeters = crossTrackError,
+                headingErrorDeg = headingError,
+                speedKmh = speed,
+                settings = settings,
+                vehicle = vehicle
+            )
+        } else if (mode == GuidanceMode.CONTOUR_CURVE && curveLine != null && curveLine.points.size >= 2) {
             val curveResult = GuidanceAlgorithms.calculateCurveTracking(
                 pivotPosition = compensatedPivot,
                 tractorHeadingDeg = heading,
@@ -587,8 +775,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Calculate U-Turn Dubins arc preview approaching headland
             val nextSwathOrigin = abLine.aLocal + (abLine.normalVector * ((activeSwathIndex + 1) * implement.swathWidth))
             uTurnPath = GuidanceAlgorithms.generateUTurnPath(
-                currentSwathEnd = swathResult.projectedPoint + (swathResult.swathDir * 15.0),
-                currentHeadingDeg = swathResult.targetHeadingDeg,
+                currentSwathEnd = swathResult.projectedPoint + (swathResult.swathDirection * 15.0),
+                currentHeadingDeg = abLine.headingDeg,
                 nextSwathStart = nextSwathOrigin,
                 turnRadiusMeters = (implement.swathWidth * 0.5).coerceAtLeast(3.5)
             )
@@ -596,10 +784,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Calculate Smart Headland Turn Guidance
             headlandTurnInfo = GuidanceAlgorithms.calculateHeadlandTurnGuidance(
                 pivotPosition = compensatedPivot,
-                tractorHeadingDeg = heading,
-                activeSwathIndex = activeSwathIndex,
-                headlandBoundary = state.headlandBoundary.ifEmpty { state.fieldBoundary }.ifEmpty { null },
-                swathDir = swathResult.swathDir
+                headingDeg = heading,
+                headlandBoundary = state.headlandBoundary.ifEmpty { state.fieldBoundary },
+                abLine = abLine,
+                isAutoUTurnEnabled = state.isAutoUTurnEnabled
             )
 
             // Auto U-Turn Engine for New Holland 8870 (Dubins arc auto-steer + operator lift/lower guidance)
@@ -629,11 +817,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (uTurnPath.isNotEmpty()) {
                         val turnSteer = GuidanceAlgorithms.calculatePurePursuitWaypointsSteering(
                             pivotPosition = compensatedPivot,
-                            tractorHeadingDeg = heading,
+                            headingDeg = heading,
                             waypoints = uTurnPath,
-                            speedKmh = speed,
-                            vehicle = vehicle,
-                            lookaheadMeters = 3.5
+                            lookaheadDistance = 3.5,
+                            wheelbase = vehicle.wheelbase
                         )
                         targetSteerAngle = turnSteer
                     }
@@ -641,7 +828,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // Check if tractor has acquired the new adjacent swath pass
                     val toTargetLine = compensatedPivot - nextSwathOrigin
                     val distToNewPass = abs(toTargetLine.dot(abLine.normalVector))
-                    val diffHeading = abs(GeoUtils.normalizeAngleDeg(heading - swathResult.targetHeadingDeg))
+                    val diffHeading = abs(GeoUtils.normalizeAngleDeg(heading - abLine.headingDeg))
 
                     // If heading has rotated around (> 120 deg from start) and close to new swath line (< 2.0m)
                     if (diffHeading > 120.0 && distToNewPass < 2.0) {
@@ -682,13 +869,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             obstacles = state.obstacles,
             warningThresholdMeters = 12.0
         )
-        if (closestObstacle != null && state.activeObstacleAlert?.id != closestObstacle.id) {
+        if (closestObstacle != null && live.activeObstacleAlert?.id != closestObstacle.id) {
             soundManager.playEndOfPassChime(viewModelScope)
             vibrateHaptic(120)
         }
 
         // Section status calculation: automatically assumes implement is active whenever auto-steer is engaged
-        val isImplementActive = state.vehicleState.isAutoSteerEngaged || implement.isMasterActive
+        val isImplementActive = isAutoSteerEngaged || implement.isMasterActive
         val effectiveImplement = implement.copy(isMasterActive = isImplementActive)
         val implementStatus = GuidanceAlgorithms.calculateImplementSections(
             pivotPosition = compensatedPivot,
@@ -696,22 +883,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             vehicle = vehicle,
             implement = effectiveImplement,
             fieldBoundary = state.fieldBoundary.ifEmpty { null },
-            appliedPolygons = state.appliedSegments,
+            appliedPolygons = emptyList(),
             sectionOverrides = state.sectionOverrides,
             spatialGrid = coverageSpatialGrid
         )
 
-        // Record applied coverage map when implement is working (Smooth continuous brush)
-        var updatedApplied: List<AppliedSwathSegment>? = null
+        // Record applied coverage map when implement is working (O(1) spatial chunk append — zero list copies)
         var addedAreaAcres = 0.0
 
         if (isImplementActive && abs(speed) > 0.3) {
-            val activeSections = implementStatus.sections.filterIndexed { idx, _ ->
-                implementStatus.sectionStates.getOrElse(idx) { false }
+            var firstActiveIdx = -1
+            var lastActiveIdx = -1
+            var activeCount = 0
+            val sections = implementStatus.sections
+            val states = implementStatus.sectionStates
+            for (idx in sections.indices) {
+                if (idx < states.size && states[idx]) {
+                    if (firstActiveIdx == -1) firstActiveIdx = idx
+                    lastActiveIdx = idx
+                    activeCount++
+                }
             }
-            if (activeSections.isNotEmpty()) {
-                val currentLeft = activeSections.first().left
-                val currentRight = activeSections.last().right
+            if (activeCount > 0) {
+                val currentLeft = sections[firstActiveIdx].left
+                val currentRight = sections[lastActiveIdx].right
                 val lastLeft = lastBoomLeft
                 val lastRight = lastBoomRight
                 val lastPiv = lastCoveragePivot
@@ -730,8 +925,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             radius = implement.toolWidth * 0.5
                         )
                         coverageSpatialGrid.addSegment(seg)
-                        updatedApplied = state.appliedSegments + seg
-                        val activeWidth = (implement.toolWidth / implement.numSections) * activeSections.size
+                        coverageChunkStore.addSegment(seg)
+                        val activeWidth = (implement.toolWidth / implement.numSections) * activeCount
                         addedAreaAcres = (activeWidth * travelDist) / 4046.86
 
                         lastBoomLeft = currentLeft
@@ -763,8 +958,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             latestHardwareSteerAngle
         } else {
             // Standalone / Tablet GPS mode: smoothly animate the front wheels to reflect commanded steer angle
-            if (state.vehicleState.isAutoSteerEngaged || abs(speed) > 0.4) {
-                val currentSteer = state.vehicleState.actualSteerAngleDeg
+            if (isAutoSteerEngaged || abs(speed) > 0.4) {
+                val currentSteer = liveVehicle.actualSteerAngleDeg
                 val diff = targetSteerAngle - currentSteer
                 val maxStep = 35.0 * dtSec
                 if (abs(diff) <= maxStep) targetSteerAngle else currentSteer + sign(diff) * maxStep
@@ -773,10 +968,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Send PGN 254 (0xFE) to Steer Controller over UDP
+        // Automatic Operator Override Safety Disengage Check
+        if (isAutoSteerEngaged && state.guidanceSettings.isOperatorOverrideEnabled) {
+            if (state.gnssSource == GnssSourceMode.SIMULATOR) {
+                if (abs(simulator.manualSteerInputDeg) > 0.5) {
+                    triggerOperatorOverride("Steering wheel moved by operator")
+                }
+            } else if (state.gnssSource == GnssSourceMode.USB_AIO_TEENSY || state.gnssSource == GnssSourceMode.UDP_NETWORK || state.isMockLoopbackActive) {
+                val steerDivergence = abs(actualSteer - targetSteerAngle)
+                if (steerDivergence > state.guidanceSettings.operatorOverrideSensitivityDeg && abs(speed) > 0.3) {
+                    triggerOperatorOverride("Steering wheel resistance / manual turn detected (Δ${String.format(java.util.Locale.US, "%.1f", steerDivergence)}°)")
+                }
+            }
+        }
+
+        // Send PGN 254 (0xFE) to Steer Controller over UDP (off main thread via AgUdpManager)
         udpManager.sendSteerCommand(
             targetSteerAngleDeg = targetSteerAngle,
-            isEngaged = state.vehicleState.isAutoSteerEngaged,
+            isEngaged = isAutoSteerEngaged,
             speedKmh = speed,
             crossTrackErrorMm = (crossTrackError * 1000.0).roundToInt(),
             sectionStates = implementStatus.sectionStates
@@ -785,7 +994,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Send PGN 254 (0xFE) to Teensy 4.1 over USB Host Serial
         usbManager.sendSteerCommand(
             targetSteerAngleDeg = targetSteerAngle,
-            isEngaged = state.vehicleState.isAutoSteerEngaged,
+            isEngaged = isAutoSteerEngaged,
             speedKmh = speed,
             crossTrackErrorMm = (crossTrackError * 1000.0).roundToInt(),
             sectionStates = implementStatus.sectionStates
@@ -817,7 +1026,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeSwathIndex = activeSwathIndex,
             swathWidth = implement.swathWidth,
             config = state.slidingHitchConfig,
-            currentState = state.slidingHitchState,
+            currentState = live.slidingHitchState,
             externalSecondGpsReport = externalSecondGps,
             originGeo = originGeo
         )
@@ -832,49 +1041,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             secondGpsManager.sendImplementSteerPacket(steerPacket, targetPort = state.slidingHitchConfig.udpPort)
         }
 
-        // Update UI state
-        _uiState.update { current ->
-            val updatedGeoPos = GeoUtils.localMetersToGeo(compensatedPivot, originGeo)
-            current.copy(
-                vehicleState = current.vehicleState.copy(
-                    geoPosition = updatedGeoPos,
-                    localPivotPosition = compensatedPivot,
-                    headingDeg = heading,
-                    speedKmh = speed,
-                    rollDeg = roll,
-                    actualSteerAngleDeg = actualSteer,
-                    targetSteerAngleDeg = targetSteerAngle,
-                    crossTrackErrorMeters = crossTrackError,
-                    headingErrorDeg = headingError,
-                    activeSwathIndex = activeSwathIndex,
-                    sectionStates = implementStatus.sectionStates
-                ),
-                slidingHitchState = updatedSlidingHitchState,
-                appliedSegments = updatedApplied ?: current.appliedSegments,
-                workedAcres = current.workedAcres + addedAreaAcres,
-                uTurnPath = uTurnPath,
-                activeObstacleAlert = closestObstacle,
-                headlandTurnInfo = headlandTurnInfo,
-                currentTerrainSquare = terrainSquare,
-                currentTerrainAttitude = terrainAttitude,
-                lastNavigationOutput = latestNavOutput
-            )
+        // Update 20 Hz LiveTelemetryState ONLY (isolated from static UI controls to prevent recomposition storms)
+        val updatedGeoPos = GeoUtils.localMetersToGeo(compensatedPivot, originGeo)
+        val updatedAbTrail: List<Vec2> = if (state.isSettingAB && state.tempPointA != null) {
+            if (abTrackTrailBuffer.isEmpty()) {
+                abTrackTrailBuffer.add(state.tempPointA)
+            }
+            val lastPt = abTrackTrailBuffer[abTrackTrailBuffer.size - 1]
+            if (compensatedPivot.distanceTo(lastPt) >= 0.25) {
+                abTrackTrailBuffer.add(compensatedPivot)
+                ArrayList(abTrackTrailBuffer)
+            } else {
+                live.abTrackTrail
+            }
+        } else {
+            if (abTrackTrailBuffer.isNotEmpty()) abTrackTrailBuffer.clear()
+            emptyList()
         }
 
+        val updatedVehicle = liveVehicle.copy(
+            geoPosition = updatedGeoPos,
+            localPivotPosition = compensatedPivot,
+            headingDeg = heading,
+            speedKmh = speed,
+            rollDeg = roll,
+            actualSteerAngleDeg = actualSteer,
+            targetSteerAngleDeg = targetSteerAngle,
+            crossTrackErrorMeters = crossTrackError,
+            headingErrorDeg = headingError,
+            activeSwathIndex = activeSwathIndex,
+            isAutoSteerEngaged = isAutoSteerEngaged,
+            sectionStates = implementStatus.sectionStates
+        )
+
+        _liveTelemetry.value = LiveTelemetryState(
+            vehicleState = updatedVehicle,
+            slidingHitchState = updatedSlidingHitchState,
+            uTurnPath = uTurnPath,
+            activeObstacleAlert = closestObstacle,
+            headlandTurnInfo = headlandTurnInfo,
+            currentTerrainSquare = terrainSquare,
+            currentTerrainAttitude = terrainAttitude,
+            lastNavigationOutput = latestNavOutput,
+            abTrackTrail = updatedAbTrail,
+            workedAcres = live.workedAcres + addedAreaAcres,
+            coverageVersion = coverageChunkStore.version,
+            appliedSegmentsCount = coverageChunkStore.totalSegmentCount
+        )
+
         // Emit simulated NMEA / KSXT sentences for real-time field diagnostics inspection in simulator mode
-        if (state.gnssSource == GnssSourceMode.SIMULATOR) {
+        if (state.gnssSource == GnssSourceMode.SIMULATOR && state.showNmeaDiagnosticsDialog) {
             val now = System.currentTimeMillis()
             if (now - lastSimNmeaTimeMs >= 50L) { // 20Hz update
                 lastSimNmeaTimeMs = now
-                val geo = _uiState.value.vehicleState.geoPosition
+                val geo = updatedGeoPos
                 val hdg = heading
                 val spdKmh = abs(speed)
                 val spdKnots = spdKmh / 1.852
                 val rollVal = roll
-                val pitchVal = state.vehicleState.pitchDeg
+                val pitchVal = liveVehicle.pitchDeg
 
-                val timeUtc = java.text.SimpleDateFormat("HHmmss.ss", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date(now))
-                val dateUtc = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date(now))
+                scratchDate.time = now
+                val timeUtc = synchronized(utcTimeFormat) { utcTimeFormat.format(scratchDate) }
+                val dateUtc = synchronized(utcDateFormat) { utcDateFormat.format(scratchDate) }
 
                 // 1. $KSXT (Unicore UM982 Dual-Antenna Heading & Position)
                 val ksxtBody = "KSXT,$dateUtc$timeUtc,${String.format(java.util.Locale.US, "%.7f", geo.longitude)},${String.format(java.util.Locale.US, "%.7f", geo.latitude)},${String.format(java.util.Locale.US, "%.2f", geo.altitude)},${String.format(java.util.Locale.US, "%.2f", hdg)},${String.format(java.util.Locale.US, "%.2f", pitchVal)},${String.format(java.util.Locale.US, "%.2f", rollVal)},4,0"
@@ -919,8 +1148,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val state = _uiState.value
-        val effectiveHeading = report.headingDeg ?: state.vehicleState.headingDeg
-        val effectiveRoll = if (report.rollDeg != 0.0) report.rollDeg else state.vehicleState.rollDeg
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val effectiveHeading = report.headingDeg ?: liveVeh.headingDeg
+        val effectiveRoll = if (report.rollDeg != 0.0) report.rollDeg else liveVeh.rollDeg
 
         val compensatedPivot = if (localPos != null) {
             GuidanceAlgorithms.compensateAntennaPosition(
@@ -932,24 +1162,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         } else null
 
-        _uiState.update { current ->
-            val updatedVeh = current.vehicleState.copy(
-                geoPosition = if (hasValidGeo) report.geoPoint else current.vehicleState.geoPosition,
-                localPivotPosition = compensatedPivot ?: current.vehicleState.localPivotPosition,
-                headingDeg = report.headingDeg ?: current.vehicleState.headingDeg,
-                speedKmh = report.speedKmh ?: current.vehicleState.speedKmh,
-                rollDeg = if (report.rollDeg != 0.0) report.rollDeg else current.vehicleState.rollDeg,
-                pitchDeg = if (report.pitchDeg != 0.0) report.pitchDeg else current.vehicleState.pitchDeg,
-                baselineLengthMeters = if (report.baselineLengthMeters > 0.0) report.baselineLengthMeters else current.vehicleState.baselineLengthMeters,
-                fixQuality = if (report.fixQuality != FixQuality.INVALID) report.fixQuality else current.vehicleState.fixQuality,
-                satellites = if (report.satellites > 0) report.satellites else current.vehicleState.satellites,
-                ageOfCorrectionSec = if (report.ageSec > 0.0) report.ageSec else current.vehicleState.ageOfCorrectionSec
-            )
-            val receiverStatus = if (report.receiverIdent.isNotEmpty()) "GNSS: ${report.receiverIdent}" else current.statusMessage
-            current.copy(
-                vehicleState = updatedVeh,
-                statusMessage = receiverStatus
-            )
+        val updatedVeh = liveVeh.copy(
+            geoPosition = if (hasValidGeo) report.geoPoint else liveVeh.geoPosition,
+            localPivotPosition = compensatedPivot ?: liveVeh.localPivotPosition,
+            headingDeg = report.headingDeg ?: liveVeh.headingDeg,
+            speedKmh = report.speedKmh ?: liveVeh.speedKmh,
+            rollDeg = if (report.rollDeg != 0.0) report.rollDeg else liveVeh.rollDeg,
+            pitchDeg = if (report.pitchDeg != 0.0) report.pitchDeg else liveVeh.pitchDeg,
+            baselineLengthMeters = if (report.baselineLengthMeters > 0.0) report.baselineLengthMeters else liveVeh.baselineLengthMeters,
+            fixQuality = if (report.fixQuality != FixQuality.INVALID) report.fixQuality else liveVeh.fixQuality,
+            satellites = if (report.satellites > 0) report.satellites else liveVeh.satellites,
+            ageOfCorrectionSec = if (report.ageSec > 0.0) report.ageSec else liveVeh.ageOfCorrectionSec
+        )
+        _liveTelemetry.update { it.copy(vehicleState = updatedVeh) }
+        if (report.receiverIdent.isNotEmpty() && state.statusMessage != "GNSS: ${report.receiverIdent}") {
+            _uiState.update { current ->
+                current.copy(statusMessage = "GNSS: ${report.receiverIdent}")
+            }
         }
     }
 
@@ -964,6 +1193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             soundManager.playAutoSteerDisengage(viewModelScope)
         }
 
+        _liveTelemetry.update { it.copy(vehicleState = it.vehicleState.copy(isAutoSteerEngaged = newEngaged)) }
         _uiState.update {
             it.copy(
                 vehicleState = it.vehicleState.copy(isAutoSteerEngaged = newEngaged),
@@ -974,15 +1204,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setPointA() {
-        val currentPivot = _uiState.value.vehicleState.localPivotPosition
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
+        abTrackTrailBuffer.clear()
+        abTrackTrailBuffer.add(currentPivot)
+        _liveTelemetry.update { it.copy(abTrackTrail = listOf(currentPivot)) }
         _uiState.update {
             it.copy(
                 tempPointA = currentPivot,
+                abTrackTrail = listOf(currentPivot),
                 isSettingAB = true,
-                statusMessage = "Point A Set. Drive forward and press Set B."
+                currentABLine = null,
+                currentCurveLine = null,
+                statusMessage = "Point A Set. Drive along your swath and tap 'SET B'."
             )
         }
+        soundManager.playClickTone(viewModelScope)
         vibrateHaptic(50)
+    }
+
+    fun cancelSetAB() {
+        abTrackTrailBuffer.clear()
+        _liveTelemetry.update { it.copy(abTrackTrail = emptyList()) }
+        _uiState.update {
+            it.copy(
+                tempPointA = null,
+                abTrackTrail = emptyList(),
+                isSettingAB = false,
+                statusMessage = "A-B Point Setting Cancelled"
+            )
+        }
+        soundManager.playClickTone(viewModelScope)
+        vibrateHaptic(40)
     }
 
     fun setPointB() {
@@ -991,28 +1243,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             setPointA()
             return
         }
-        val pointB = _uiState.value.vehicleState.localPivotPosition
-        if (pointA.distanceTo(pointB) < 3.0) {
-            _uiState.update { it.copy(statusMessage = "Points too close. Drive at least 3m from A.") }
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val pointB = liveVeh.localPivotPosition
+        val dist = pointA.distanceTo(pointB)
+        abTrackTrailBuffer.clear()
+        _liveTelemetry.update { it.copy(abTrackTrail = emptyList()) }
+
+        // If vehicle is stationary or moved < 1.0m, create an A+ swath along current heading
+        if (dist < 1.0) {
+            val heading = liveVeh.headingDeg
+            val aGeo = GeoUtils.localMetersToGeo(pointA, originGeo)
+            val newAB = ABLine.fromAPlus(pointA, heading, aGeo, "A+ Swath (${heading.roundToInt()}°)")
+            soundManager.playSnapChime(viewModelScope)
+            _uiState.update {
+                it.copy(
+                    currentABLine = newAB,
+                    tempPointA = null,
+                    abTrackTrail = emptyList(),
+                    isSettingAB = false,
+                    guidanceMode = GuidanceMode.AB_LINE,
+                    statusMessage = "A-B Swath Line Created: ${heading.roundToInt()}° (Heading Locked)"
+                )
+            }
+            vibrateHaptic(100)
             return
         }
+
         val aGeo = GeoUtils.localMetersToGeo(pointA, originGeo)
         val bGeo = GeoUtils.localMetersToGeo(pointB, originGeo)
         val newAB = ABLine.fromPoints(pointA, pointB, aGeo, bGeo, "AB Line ${_uiState.value.currentField?.name ?: ""}")
+        soundManager.playSnapChime(viewModelScope)
         _uiState.update {
             it.copy(
                 currentABLine = newAB,
                 tempPointA = null,
+                abTrackTrail = emptyList(),
                 isSettingAB = false,
                 guidanceMode = GuidanceMode.AB_LINE,
-                statusMessage = "AB Line Configured (${newAB.headingDeg.roundToInt()}°)"
+                statusMessage = "A-B Swath Line Created: ${newAB.headingDeg.roundToInt()}° (${String.format(java.util.Locale.US, "%.1f", dist)}m / ${String.format(java.util.Locale.US, "%.0f", dist * 3.28084)}ft)"
             )
         }
         vibrateHaptic(100)
     }
 
     fun createAPlusLine(headingDeg: Double) {
-        val currentPivot = _uiState.value.vehicleState.localPivotPosition
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
         val aGeo = GeoUtils.localMetersToGeo(currentPivot, originGeo)
         val newAB = ABLine.fromAPlus(currentPivot, headingDeg, aGeo, "A+ (${headingDeg.roundToInt()}°)")
         _uiState.update {
@@ -1055,11 +1330,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openDeletePathConfirmDialog(open: Boolean) {
+        _uiState.update { it.copy(showDeletePathConfirmDialog = open) }
+        soundManager.playClickTone(viewModelScope)
+        vibrateHaptic(40)
+    }
+
+    fun confirmDeleteCurrentGuidancePath() {
+        abTrackTrailBuffer.clear()
+        _liveTelemetry.update {
+            it.copy(
+                abTrackTrail = emptyList(),
+                uTurnPath = emptyList(),
+                vehicleState = it.vehicleState.copy(
+                    isAutoSteerEngaged = false,
+                    activeSwathIndex = 0,
+                    crossTrackErrorMeters = 0.0,
+                    headingErrorDeg = 0.0,
+                    targetSteerAngleDeg = 0.0
+                )
+            )
+        }
+        _uiState.update {
+            it.copy(
+                showDeletePathConfirmDialog = false,
+                currentABLine = null,
+                currentCurveLine = null,
+                tempPointA = null,
+                abTrackTrail = emptyList(),
+                isSettingAB = false,
+                guidanceMode = GuidanceMode.AB_LINE,
+                vehicleState = it.vehicleState.copy(
+                    isAutoSteerEngaged = false,
+                    activeSwathIndex = 0,
+                    crossTrackErrorMeters = 0.0,
+                    headingErrorDeg = 0.0,
+                    targetSteerAngleDeg = 0.0
+                ),
+                statusMessage = "Active AB Guidance Path Deleted & Auto-Steer Disengaged"
+            )
+        }
+        soundManager.playDisengageChime(viewModelScope)
+        vibrateHaptic(100)
+    }
+
     fun startCurveRecording() {
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
         _uiState.update {
             it.copy(
                 isRecordingCurve = true,
-                recordingCurvePoints = listOf(it.vehicleState.localPivotPosition),
+                recordingCurvePoints = listOf(currentPivot),
                 statusMessage = "Recording Contour Curve... Drive baseline pass."
             )
         }
@@ -1089,21 +1409,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun snapABLineToVehicle() {
         val state = _uiState.value
-        val pivot = state.vehicleState.localPivotPosition
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val pivot = liveVeh.localPivotPosition
         val swathWidth = state.implementConfig.swathWidth
 
         if (state.guidanceMode == GuidanceMode.CONTOUR_CURVE && state.currentCurveLine != null) {
             val curve = state.currentCurveLine
             val curveResult = GuidanceAlgorithms.calculateCurveTracking(
                 pivotPosition = pivot,
-                tractorHeadingDeg = state.vehicleState.headingDeg,
+                tractorHeadingDeg = liveVeh.headingDeg,
                 curveLine = curve,
                 swathWidth = swathWidth
             )
             if (curveResult != null) {
                 val shift = curveResult.crossTrackErrorMeters
                 val shiftedPts = curve.points.map { pt ->
-                    pt + (curveResult.swathDir.perpClockwise() * shift)
+                    pt + (curveResult.swathDirection.perpClockwise() * shift)
                 }
                 _uiState.update {
                     it.copy(
@@ -1119,7 +1440,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val abLine = state.currentABLine ?: return
         val swathResult = GuidanceAlgorithms.calculateSwathTracking(
             pivotPosition = pivot,
-            tractorHeadingDeg = state.vehicleState.headingDeg,
+            tractorHeadingDeg = liveVeh.headingDeg,
             abLine = abLine,
             swathWidth = swathWidth
         )
@@ -1129,6 +1450,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val aGeo = GeoUtils.localMetersToGeo(shiftedA, originGeo)
         val bGeo = GeoUtils.localMetersToGeo(shiftedB, originGeo)
         val updated = ABLine.fromPoints(shiftedA, shiftedB, aGeo, bGeo, abLine.name)
+        soundManager.playSnapChime(viewModelScope)
         _uiState.update {
             it.copy(
                 currentABLine = updated,
@@ -1274,17 +1596,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startBoundaryRecording() {
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
         _uiState.update {
             it.copy(
                 isRecordingBoundary = true,
-                fieldBoundary = listOf(it.vehicleState.localPivotPosition),
+                fieldBoundary = listOf(currentPivot),
                 statusMessage = "Recording Boundary... Drive perimeter of field."
             )
         }
     }
 
     fun addBoundaryPoint() {
-        val currentPivot = _uiState.value.vehicleState.localPivotPosition
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
         _uiState.update {
             it.copy(
                 fieldBoundary = it.fieldBoundary + currentPivot,
@@ -1344,6 +1667,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val id = repository.saveField(newField)
             withContext(Dispatchers.Main) {
                 coverageSpatialGrid.clear()
+                coverageChunkStore.clear()
+                _liveTelemetry.update {
+                    it.copy(
+                        workedAcres = 0.0,
+                        coverageVersion = coverageChunkStore.version,
+                        appliedSegmentsCount = 0
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         currentField = newField.copy(id = id),
@@ -1376,7 +1707,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             val updatedField = currentField.copy(
-                workedAcres = state.workedAcres,
+                workedAcres = _liveTelemetry.value.workedAcres,
                 boundaryPointsJson = boundaryStr,
                 headlandPointsJson = headlandStr,
                 activeAbLineName = ab?.name ?: "",
@@ -1392,7 +1723,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val savedFieldId = repository.saveField(updatedField)
             val fieldId = if (currentField.id != 0L) currentField.id else savedFieldId
 
-            val passEntities = state.appliedSegments.map { seg ->
+            val passEntities = coverageChunkStore.snapshotAllSegments().map { seg ->
                 CoveredPassEntity(
                     fieldId = fieldId,
                     leftStartX = seg.leftStart.x,
@@ -1481,7 +1812,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 originGeo = GeoPoint(field.originLat, field.originLon, 317.0)
             }
 
-            val currentGeo = _uiState.value.vehicleState.geoPosition
+            val currentGeo = _liveTelemetry.value.vehicleState.geoPosition
             val newLocalPivot = if (currentGeo.latitude != 0.0 && currentGeo.longitude != 0.0) {
                 GeoUtils.geoToLocalMeters(currentGeo, originGeo)
             } else if (abLine != null) {
@@ -1494,7 +1825,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             withContext(Dispatchers.Main) {
                 coverageSpatialGrid.clear()
-                coverageSpatialGrid.addAll(restoredSegments)
+                coverageChunkStore.clear()
+                restoredSegments.forEach {
+                    coverageSpatialGrid.addSegment(it)
+                    coverageChunkStore.addSegment(it)
+                }
+                _liveTelemetry.update {
+                    it.copy(
+                        workedAcres = field.workedAcres,
+                        coverageVersion = coverageChunkStore.version,
+                        appliedSegmentsCount = coverageChunkStore.totalSegmentCount,
+                        vehicleState = it.vehicleState.copy(localPivotPosition = newLocalPivot)
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         currentField = field,
@@ -1502,7 +1845,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         fieldBoundary = boundary,
                         headlandBoundary = headland,
                         currentABLine = abLine,
-                        appliedSegments = restoredSegments,
+                        appliedSegments = emptyList(),
                         workedAcres = field.workedAcres,
                         isFieldJobActive = true,
                         vehicleState = it.vehicleState.copy(localPivotPosition = newLocalPivot),
@@ -1554,7 +1897,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectNtrip(config: NtripConfig) {
         ntripConfig = config
-        ntripClient.start(viewModelScope, config)
+        ntripClient.start(config, viewModelScope)
     }
 
     fun disconnectNtrip() {
@@ -1587,6 +1930,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleNightMode() {
         _uiState.update { it.copy(isNightMode = !it.isNightMode) }
+    }
+
+    fun toggleOledNightMode() {
+        val current = _uiState.value.themeMode
+        val next = if (current == DisplayThemeMode.CAB_OLED_NIGHT) DisplayThemeMode.STANDARD_AG else DisplayThemeMode.CAB_OLED_NIGHT
+        _uiState.update {
+            it.copy(
+                themeMode = next,
+                isNightMode = true,
+                statusMessage = if (next == DisplayThemeMode.CAB_OLED_NIGHT) "OLED Red/Amber Cab Night Mode (Zero Glare)" else "Sentinel Guidance Emerald Theme"
+            )
+        }
+        vibrateHaptic(50)
+    }
+
+    fun cycleThemeMode() {
+        val values = DisplayThemeMode.values()
+        val currentIndex = values.indexOf(_uiState.value.themeMode)
+        val next = values[(currentIndex + 1) % values.size]
+        _uiState.update {
+            it.copy(
+                themeMode = next,
+                isNightMode = (next != DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST),
+                statusMessage = "Theme: ${next.label}"
+            )
+        }
+        vibrateHaptic(40)
+    }
+
+    fun setThemeMode(mode: DisplayThemeMode) {
+        _uiState.update {
+            it.copy(
+                themeMode = mode,
+                isNightMode = (mode != DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST),
+                statusMessage = "Theme: ${mode.label}"
+            )
+        }
+        vibrateHaptic(40)
     }
 
     fun toggleSatelliteOverlay() {
@@ -1857,6 +2238,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetWorkedArea() {
         coverageSpatialGrid.clear()
+        coverageChunkStore.clear()
+        _liveTelemetry.update {
+            it.copy(
+                workedAcres = 0.0,
+                coverageVersion = coverageChunkStore.version,
+                appliedSegmentsCount = 0
+            )
+        }
         _uiState.update {
             it.copy(appliedSegments = emptyList(), workedAcres = 0.0, statusMessage = "Coverage Map Cleared")
         }
@@ -1867,11 +2256,67 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setManualSteerAngle(steerAngleDeg: Double) {
+        if (_uiState.value.vehicleState.isAutoSteerEngaged && kotlin.math.abs(steerAngleDeg) > 0.4) {
+            triggerOperatorOverride("Operator turned steering wheel manually")
+        }
         simulator.manualSteerInputDeg = steerAngleDeg
     }
 
     fun releaseManualSteer() {
         simulator.manualSteerInputDeg = 0.0
+    }
+
+    fun triggerOperatorOverride(reason: String = "Operator steering wheel motion detected") {
+        if (!_uiState.value.vehicleState.isAutoSteerEngaged) return
+        vibrateHaptic(180)
+        soundManager.playOperatorOverrideAlert(viewModelScope)
+        _liveTelemetry.update { it.copy(vehicleState = it.vehicleState.copy(isAutoSteerEngaged = false)) }
+        _uiState.update {
+            it.copy(
+                vehicleState = it.vehicleState.copy(isAutoSteerEngaged = false),
+                statusMessage = "⚠️ OPERATOR OVERRIDE: $reason (Auto-Steer Disengaged)",
+                isOperatorOverrideAlertVisible = true,
+                operatorOverrideReason = reason
+            )
+        }
+    }
+
+    fun dismissOperatorOverrideAlert() {
+        _uiState.update { it.copy(isOperatorOverrideAlertVisible = false) }
+    }
+
+    fun setSteeringAggression(percent: Int) {
+        val clamped = percent.coerceIn(40, 250)
+        _uiState.update {
+            it.copy(
+                guidanceSettings = it.guidanceSettings.copy(steeringAggressionPercent = clamped),
+                statusMessage = "Steering Aggression Set: $clamped%"
+            )
+        }
+        vibrateHaptic(40)
+    }
+
+    fun setOperatorOverrideSensitivity(deg: Double) {
+        val clamped = deg.coerceIn(1.0, 8.0)
+        _uiState.update {
+            it.copy(
+                guidanceSettings = it.guidanceSettings.copy(operatorOverrideSensitivityDeg = clamped),
+                statusMessage = "Operator Override Sensitivity: ${String.format(java.util.Locale.US, "%.1f", clamped)}°"
+            )
+        }
+    }
+
+    fun toggleOperatorOverride(enabled: Boolean) {
+        _uiState.update {
+            it.copy(
+                guidanceSettings = it.guidanceSettings.copy(isOperatorOverrideEnabled = enabled),
+                statusMessage = if (enabled) "Operator Steering Override: ENABLED" else "Operator Steering Override: DISABLED"
+            )
+        }
+    }
+
+    fun openSteerAggressionDialog(show: Boolean) {
+        _uiState.update { it.copy(showSteerAggressionDialog = show) }
     }
 
     fun isSimReverse(): Boolean = simulator.isReverse
@@ -1882,6 +2327,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setGnssSource(source: GnssSourceMode) {
+        _liveTelemetry.update {
+            it.copy(
+                vehicleState = it.vehicleState.copy(
+                    speedKmh = if (source == GnssSourceMode.ANDROID_GPS) 0.0 else it.vehicleState.speedKmh,
+                    targetSteerAngleDeg = 0.0
+                )
+            )
+        }
         _uiState.update { 
             it.copy(
                 gnssSource = source,
@@ -1929,6 +2382,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         simulator.resetTo(Vec2(0.0, -120.0), 0.0)
 
+        _liveTelemetry.update {
+            it.copy(
+                vehicleState = it.vehicleState.copy(
+                    geoPosition = targetGeo,
+                    localPivotPosition = Vec2(0.0, 0.0),
+                    speedKmh = 0.0
+                )
+            )
+        }
         _uiState.update {
             it.copy(
                 fieldBoundary = boundary,
@@ -1951,7 +2413,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun recenterOriginToCurrentGps() {
-        val currentGeo = _uiState.value.vehicleState.geoPosition
+        val currentGeo = _liveTelemetry.value.vehicleState.geoPosition
         val ctx = getApplication<Application>()
         val locManager = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         var bestLoc: Location? = null
@@ -2073,7 +2535,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val sats = usedInFixSatellitesCount.coerceAtLeast(visibleSatellitesCount).coerceAtLeast(12)
 
-        _uiState.update { current ->
+        _liveTelemetry.update { current ->
             current.copy(
                 vehicleState = current.vehicleState.copy(
                     geoPosition = effectiveGeo,
@@ -2493,32 +2955,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(showExportDialog = show) }
     }
 
-    fun cycleThemeMode() {
-        val current = _uiState.value.themeMode
-        val next = when (current) {
-            DisplayThemeMode.STANDARD_AG -> DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST
-            DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> DisplayThemeMode.CAB_OLED_NIGHT
-            DisplayThemeMode.CAB_OLED_NIGHT -> DisplayThemeMode.STANDARD_AG
-        }
-        _uiState.update {
-            it.copy(
-                themeMode = next,
-                isNightMode = (next == DisplayThemeMode.CAB_OLED_NIGHT),
-                statusMessage = "Theme: ${next.label}"
-            )
-        }
-    }
-
-    fun setThemeMode(mode: DisplayThemeMode) {
-        _uiState.update {
-            it.copy(
-                themeMode = mode,
-                isNightMode = (mode == DisplayThemeMode.CAB_OLED_NIGHT),
-                statusMessage = "Theme: ${mode.label}"
-            )
-        }
-    }
-
     fun addObstacleAtVehicle(
         type: ObstacleType,
         name: String,
@@ -2526,8 +2962,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notes: String = ""
     ) {
         val current = _uiState.value
-        val pivotPos = current.vehicleState.localPivotPosition
-        val geoPos = current.vehicleState.geoPosition
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val pivotPos = liveVeh.localPivotPosition
+        val geoPos = liveVeh.geoPosition
         val fieldId = current.currentField?.id ?: 0L
 
         val newObs = FieldObstacle(
@@ -2588,8 +3025,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun skipSwathPass(delta: Int) {
-        val current = _uiState.value.vehicleState.activeSwathIndex
+        val current = _liveTelemetry.value.vehicleState.activeSwathIndex
         val target = current + delta
+        _liveTelemetry.update {
+            it.copy(vehicleState = it.vehicleState.copy(activeSwathIndex = target))
+        }
         _uiState.update {
             it.copy(
                 vehicleState = it.vehicleState.copy(activeSwathIndex = target),
@@ -2633,9 +3073,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectImplementPreset(selectedPreset)
         }
 
-        val pivot = _uiState.value.vehicleState.localPivotPosition
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val pivot = liveVeh.localPivotPosition
 
-        val tractorHeading = if (guidanceMode == WizardGuidanceMode.A_PLUS_HEADING) aPlusHeadingDeg else _uiState.value.vehicleState.headingDeg
+        val tractorHeading = if (guidanceMode == WizardGuidanceMode.A_PLUS_HEADING) aPlusHeadingDeg else liveVeh.headingDeg
         val headingRad = Math.toRadians(tractorHeading)
         val fwd = Vec2(sin(headingRad), cos(headingRad))
         val right = Vec2(cos(headingRad), -sin(headingRad))
@@ -2733,6 +3174,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val savedEntity = fieldEntity.copy(id = fieldId)
             withContext(Dispatchers.Main) {
                 coverageSpatialGrid.clear()
+                coverageChunkStore.clear()
+                _liveTelemetry.update {
+                    it.copy(
+                        workedAcres = 0.0,
+                        coverageVersion = coverageChunkStore.version,
+                        appliedSegmentsCount = 0
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         currentField = savedEntity,
@@ -2757,7 +3206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentBoundary = state.fieldBoundary
         val headland = state.headlandBoundary
         val abLine = state.currentABLine
-        val workedAcres = state.workedAcres
+        val workedAcres = _liveTelemetry.value.workedAcres
 
         val field = state.currentField ?: FieldEntity(
             id = 0L,
@@ -2787,7 +3236,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Save all worked passes into Room database!
-            val passEntities = state.appliedSegments.map { seg ->
+            val passEntities = coverageChunkStore.snapshotAllSegments().map { seg ->
                 CoveredPassEntity(
                     fieldId = fieldId,
                     leftStartX = seg.leftStart.x,
@@ -2908,6 +3357,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val saved = fieldEntity.copy(id = fieldId)
             withContext(Dispatchers.Main) {
                 coverageSpatialGrid.clear()
+                coverageChunkStore.clear()
+                _liveTelemetry.update {
+                    it.copy(
+                        workedAcres = 0.0,
+                        coverageVersion = coverageChunkStore.version,
+                        appliedSegmentsCount = 0
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         currentField = saved,
@@ -2928,10 +3385,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openOuterBoundaryDialog(open: Boolean = true) {
+        val currentPivot = _liveTelemetry.value.vehicleState.localPivotPosition
         _uiState.update {
             it.copy(
                 showOuterBoundaryCornersDialog = open,
-                capturedCorners = if (open && it.capturedCorners.isEmpty()) listOf(it.vehicleState.localPivotPosition) else it.capturedCorners
+                capturedCorners = if (open && it.capturedCorners.isEmpty()) listOf(currentPivot) else it.capturedCorners
             )
         }
     }
@@ -2941,7 +3399,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun captureCurrentCorner() {
-        val pivot = _uiState.value.vehicleState.localPivotPosition
+        val pivot = _liveTelemetry.value.vehicleState.localPivotPosition
         val currentList = _uiState.value.capturedCorners
         val updated = currentList + pivot
         _uiState.update {
@@ -3078,9 +3536,557 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ==========================================
+    // PATH MEMORY RECALL & EXACT TRACK REPLAY
+    // ==========================================
+
+    fun openPathMemoryDialog(open: Boolean = true) {
+        _uiState.update { it.copy(showPathMemoryDialog = open) }
+    }
+
+    fun startPathRecording(
+        name: String = "24-Row Planting Pass",
+        rowCount: Int = 24,
+        rowSpacingInches: Double = 22.0,
+        isPlanter: Boolean = true
+    ) {
+        val liveVeh = _liveTelemetry.value.vehicleState
+        val currentPivot = liveVeh.localPivotPosition
+        val initialPt = PathPoint(
+            localX = currentPivot.x,
+            localY = currentPivot.y,
+            headingDeg = liveVeh.headingDeg,
+            speedKmh = liveVeh.speedKmh
+        )
+        _uiState.update {
+            it.copy(
+                isRecordingPath = true,
+                currentRecordingPathName = name,
+                currentRecordingRowCount = rowCount,
+                currentRecordingRowSpacingInches = rowSpacingInches,
+                currentRecordingPathPoints = listOf(initialPt),
+                statusMessage = "Recording Path: '$name' started. Drive pass..."
+            )
+        }
+        vibrateHaptic(80)
+    }
+
+    fun stopAndSavePathRecording() {
+        val state = _uiState.value
+        val pts = state.currentRecordingPathPoints
+        if (pts.size < 2) {
+            _uiState.update {
+                it.copy(
+                    isRecordingPath = false,
+                    currentRecordingPathPoints = emptyList(),
+                    statusMessage = "Path too short. Minimum 2 points required."
+                )
+            }
+            return
+        }
+
+        var totalDist = 0.0
+        for (i in 0 until pts.size - 1) {
+            totalDist += pts[i].toVec2().distanceTo(pts[i + 1].toVec2())
+        }
+
+        val fieldId = state.currentField?.id ?: 0L
+        val recordedPath = RecordedPath(
+            id = 0L,
+            name = state.currentRecordingPathName.ifBlank { "Recorded Path ${state.savedRecordedPaths.size + 1}" },
+            fieldId = fieldId,
+            points = pts,
+            totalDistanceMeters = totalDist,
+            rowCount = state.currentRecordingRowCount,
+            rowSpacingInches = state.currentRecordingRowSpacingInches,
+            isPlanterTrack = true,
+            createdAt = System.currentTimeMillis()
+        )
+
+        val entity = RecordedPathEntity(
+            id = 0L,
+            fieldId = fieldId,
+            name = recordedPath.name,
+            pointsJson = recordedPath.toJson(),
+            totalDistanceMeters = totalDist,
+            rowCount = recordedPath.rowCount,
+            rowSpacingInches = recordedPath.rowSpacingInches,
+            isPlanterTrack = true,
+            createdAt = recordedPath.createdAt
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val pathId = repository.saveRecordedPath(entity)
+            val savedPath = recordedPath.copy(id = pathId)
+            withContext(Dispatchers.Main) {
+                _uiState.update {
+                    it.copy(
+                        isRecordingPath = false,
+                        currentRecordingPathPoints = emptyList(),
+                        activeRecallPath = savedPath,
+                        guidanceMode = GuidanceMode.EXACT_PATH_MEMORY,
+                        statusMessage = "Saved Path '${savedPath.name}' (${pts.size} pts, ${String.format("%.1f", totalDist)}m). Guidance Ready."
+                    )
+                }
+            }
+        }
+        soundManager.playSnapChime(viewModelScope)
+        vibrateHaptic(100)
+    }
+
+    fun selectRecallPath(path: RecordedPath) {
+        _uiState.update {
+            it.copy(
+                activeRecallPath = path,
+                guidanceMode = GuidanceMode.EXACT_PATH_MEMORY,
+                statusMessage = "Memory Recall Active: '${path.name}' (${path.points.size} pts, ${path.rowCount}R @ ${path.rowSpacingInches}\")"
+            )
+        }
+        soundManager.playSnapChime(viewModelScope)
+        vibrateHaptic(80)
+    }
+
+    fun clearRecallPath() {
+        _uiState.update {
+            it.copy(
+                activeRecallPath = null,
+                guidanceMode = if (it.currentABLine != null) GuidanceMode.AB_LINE else GuidanceMode.A_PLUS,
+                statusMessage = "Path Memory Recall Cleared"
+            )
+        }
+    }
+
+    fun deleteRecordedPath(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteRecordedPath(id)
+            withContext(Dispatchers.Main) {
+                _uiState.update {
+                    it.copy(
+                        activeRecallPath = if (it.activeRecallPath?.id == id) null else it.activeRecallPath,
+                        statusMessage = "Recorded Path deleted"
+                    )
+                }
+            }
+        }
+    }
+
+    // ==============================================================
+    // ORGANIC CULTIVATOR PASS SPLITTING (24-Row 22" → Two 12-Row 22")
+    // ==============================================================
+
+    fun openCultivatorSplitDialog(open: Boolean = true) {
+        _uiState.update { it.copy(showCultivatorSplitDialog = open) }
+    }
+
+    fun applySplitCultivatorAbLine(
+        planterAb: ABLine,
+        passChoice: CultivatorSplitPass,
+        knifeOffsetInches: Double = 0.0
+    ) {
+        val (passA, passB) = CultivatorSplittingEngine.splitPlanterAbLine(
+            planterAb = planterAb,
+            planterRows = 24,
+            cultivatorRows = 12,
+            rowSpacingInches = 22.0,
+            interRowKnifeOffsetInches = knifeOffsetInches,
+            originGeo = originGeo
+        )
+
+        val chosenLine = if (passChoice == CultivatorSplitPass.PASS_A_LEFT) passA else passB
+
+        _uiState.update {
+            it.copy(
+                currentABLine = chosenLine,
+                splitCultivatorLineA = passA,
+                splitCultivatorLineB = passB,
+                activeCultivatorSplitPass = passChoice,
+                cultivatorKnifeOffsetInches = knifeOffsetInches,
+                guidanceMode = GuidanceMode.AB_LINE,
+                statusMessage = "Cultivator Split: ${passChoice.label} Active (-11ft / +11ft from Planter)"
+            )
+        }
+        soundManager.playSnapChime(viewModelScope)
+        vibrateHaptic(80)
+    }
+
+    fun applySplitCultivatorPath(
+        planterPath: RecordedPath,
+        passChoice: CultivatorSplitPass,
+        knifeOffsetInches: Double = 0.0
+    ) {
+        val (passA, passB) = CultivatorSplittingEngine.splitRecordedPlanterPath(
+            planterPath = planterPath,
+            planterRows = 24,
+            cultivatorRows = 12,
+            rowSpacingInches = 22.0,
+            interRowKnifeOffsetInches = knifeOffsetInches
+        )
+
+        val chosenPath = if (passChoice == CultivatorSplitPass.PASS_A_LEFT) passA else passB
+
+        _uiState.update {
+            it.copy(
+                activeRecallPath = chosenPath,
+                activeCultivatorSplitPass = passChoice,
+                cultivatorKnifeOffsetInches = knifeOffsetInches,
+                guidanceMode = GuidanceMode.EXACT_PATH_MEMORY,
+                statusMessage = "Cultivator Recall Path: ${passChoice.label} Active"
+            )
+        }
+        soundManager.playSnapChime(viewModelScope)
+        vibrateHaptic(80)
+    }
+
+    fun toggleCultivatorSplitPass() {
+        val currentPass = _uiState.value.activeCultivatorSplitPass
+        val nextPass = if (currentPass == CultivatorSplitPass.PASS_A_LEFT) CultivatorSplitPass.PASS_B_RIGHT else CultivatorSplitPass.PASS_A_LEFT
+
+        val state = _uiState.value
+        if (state.splitCultivatorLineA != null && state.splitCultivatorLineB != null) {
+            val chosen = if (nextPass == CultivatorSplitPass.PASS_A_LEFT) state.splitCultivatorLineA else state.splitCultivatorLineB
+            _uiState.update {
+                it.copy(
+                    currentABLine = chosen,
+                    activeCultivatorSplitPass = nextPass,
+                    statusMessage = "Cultivator Switched to: ${nextPass.label}"
+                )
+            }
+            soundManager.playSnapChime(viewModelScope)
+            vibrateHaptic(60)
+        } else if (state.activeRecallPath != null) {
+            applySplitCultivatorPath(state.activeRecallPath, nextPass, state.cultivatorKnifeOffsetInches)
+        } else if (state.currentABLine != null) {
+            applySplitCultivatorAbLine(state.currentABLine, nextPass, state.cultivatorKnifeOffsetInches)
+        }
+    }
+
+    // ==============================================================
+    // PS4 & GAMEPAD CONTROLLER BINDINGS & DISPATCH
+    // ==============================================================
+
+    fun openGamepadWizard(open: Boolean = true) {
+        _uiState.update { it.copy(showGamepadWizardDialog = open) }
+    }
+
+    fun saveGamepadBinding(binding: GamepadBinding) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val entity = GamepadBindingEntity(
+                id = binding.id,
+                buttonCode = binding.button.code,
+                actionCode = binding.action.code,
+                label = binding.displayLabel,
+                isCustom = binding.isCustom
+            )
+            val id = repository.saveGamepadBinding(entity)
+            withContext(Dispatchers.Main) {
+                _uiState.update { current ->
+                    val updatedList = current.gamepadBindings.filter { it.button != binding.button } + binding.copy(id = id)
+                    current.copy(
+                        gamepadBindings = updatedList,
+                        statusMessage = "Mapped: ${binding.button.ps4Label} → ${binding.action.title}"
+                    )
+                }
+            }
+        }
+        vibrateHaptic(50)
+    }
+
+    fun deleteGamepadBinding(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteGamepadBinding(id)
+            withContext(Dispatchers.Main) {
+                _uiState.update { current ->
+                    current.copy(
+                        gamepadBindings = current.gamepadBindings.filter { it.id != id },
+                        statusMessage = "Binding Removed"
+                    )
+                }
+            }
+        }
+    }
+
+    fun resetDefaultGamepadBindings() {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.clearAllGamepadBindings()
+            val defaults = GamepadProfileFactory.createDefaultPs4Bindings()
+            val dbEntities = defaults.map { b ->
+                GamepadBindingEntity(
+                    buttonCode = b.button.code,
+                    actionCode = b.action.code,
+                    label = b.displayLabel,
+                    isCustom = b.isCustom
+                )
+            }
+            repository.saveGamepadBindings(dbEntities)
+            withContext(Dispatchers.Main) {
+                _uiState.update {
+                    it.copy(
+                        gamepadBindings = defaults,
+                        statusMessage = "Restored Default PS4 Controller Controls"
+                    )
+                }
+            }
+        }
+        vibrateHaptic(80)
+    }
+
+    fun onGamepadKeyDown(keyCode: Int): Boolean {
+        val button = GamepadButton.fromKeyCode(keyCode) ?: return false
+        _uiState.update { it.copy(lastPressedGamepadButton = button) }
+
+        val binding = _uiState.value.gamepadBindings.firstOrNull { it.button == button }
+        if (binding != null) {
+            executeAgAction(binding.action)
+            return true
+        }
+        return false
+    }
+
+    fun executeAgAction(action: AgAction) {
+        when (action) {
+            AgAction.TOGGLE_AUTO_STEER -> toggleAutoSteer()
+            AgAction.SNAP_AB_LINE -> snapABLineToVehicle()
+            AgAction.NUDGE_LEFT_1_INCH -> nudgeSwath(-2.54)
+            AgAction.NUDGE_RIGHT_1_INCH -> nudgeSwath(2.54)
+            AgAction.NUDGE_HALF_ROW_11_INCH -> nudgeHalfRow22Inch(false)
+            AgAction.NUDGE_FULL_ROW_22_INCH -> nudgeFullRow22Inch(true)
+            AgAction.CYCLE_SWATH_LEFT -> cycleSwath(-1)
+            AgAction.CYCLE_SWATH_RIGHT -> cycleSwath(1)
+            AgAction.TOGGLE_CULTIVATOR_SPLIT -> toggleCultivatorSplitPass()
+            AgAction.TOGGLE_SECTION_MASTER -> toggleAutoSectionControl()
+            AgAction.TRIGGER_U_TURN -> triggerManualUTurn()
+            AgAction.CENTER_GPS -> recenterOriginToCurrentGps()
+            AgAction.RECORD_PATH_POINT -> dropQuickObstacle()
+            AgAction.CYCLE_CAMERA_VIEW -> cycleCameraViewMode()
+            AgAction.CYCLE_DISPLAY_THEME -> cycleThemeMode()
+            AgAction.SLIDING_HITCH_LEFT -> nudgeSlidingHitch(-5.0)
+            AgAction.SLIDING_HITCH_RIGHT -> nudgeSlidingHitch(5.0)
+            AgAction.ZERO_WAS -> zeroWasAtCurrentAngle()
+        }
+    }
+
+    // ==============================================================
+    // 1-TAP USB FIELD BACKUP & MULTI-TRACTOR SYNC
+    // ==============================================================
+
+    fun openUsbBackupSyncDialog(open: Boolean = true) {
+        _uiState.update { it.copy(showUsbBackupSyncDialog = open) }
+    }
+
+    fun exportUsbBackupPackage(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val fields = repository.allFields.first()
+            val abLines = if (fields.isNotEmpty()) repository.getABLinesForField(fields.first().id).first() else emptyList()
+            val recordedPaths = repository.getAllRecordedPaths().first()
+            val implementProfiles = repository.getAllImplementProfiles().first()
+            val obstacles = if (fields.isNotEmpty()) repository.getObstaclesForFieldSync(fields.first().id) else emptyList()
+
+            val backupJson = FieldBackupManager.createBackupPackage(
+                fields = fields,
+                abLines = abLines,
+                recordedPaths = recordedPaths,
+                implementProfiles = implementProfiles,
+                obstacles = obstacles,
+                tractorName = "Sentinel Guidance Organic Tractor"
+            )
+
+            withContext(Dispatchers.Main) {
+                FieldBackupManager.exportBackupAndShare(context, backupJson)
+                _uiState.update {
+                    it.copy(statusMessage = "Backup Exported: ${fields.size} fields, ${recordedPaths.size} paths ready for USB transfer")
+                }
+            }
+        }
+        vibrateHaptic(100)
+    }
+
+    fun restoreUsbBackupPackage(jsonString: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val result = FieldBackupManager.parseBackupPackage(jsonString)
+                for (f in result.fields) {
+                    val fieldId = repository.saveField(f)
+                    for (ab in result.abLines.filter { it.fieldId == f.id }) {
+                        repository.saveABLine(ab.copy(fieldId = fieldId))
+                    }
+                    for (path in result.recordedPaths.filter { it.fieldId == f.id }) {
+                        repository.saveRecordedPath(path.copy(fieldId = fieldId))
+                    }
+                    for (obs in result.obstacles.filter { it.fieldId == f.id }) {
+                        repository.saveObstacle(obs.copy(fieldId = fieldId))
+                    }
+                }
+                for (imp in result.implementProfiles) {
+                    repository.saveImplementProfile(imp)
+                }
+
+                withContext(Dispatchers.Main) {
+                    _uiState.update {
+                        it.copy(
+                            statusMessage = "Restored from '${result.sourceTractor}': ${result.fields.size} fields, ${result.recordedPaths.size} paths"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(statusMessage = "Backup Restore Failed: ${e.localizedMessage}") }
+                }
+            }
+        }
+        vibrateHaptic(100)
+    }
+
+    // ==============================================================
+    // HYDRAULIC SCV & 3-POINT HITCH TRIGGER KEYBINDINGS
+    // ==============================================================
+
+    fun openScvHitchWizard(open: Boolean = true) {
+        _uiState.update { it.copy(showScvHitchWizard = open) }
+    }
+
+    fun updateThreePointConfig(config: ThreePointHitchConfig) {
+        val prevHeight = _uiState.value.threePointConfig.currentHeightPercent
+        _uiState.update { it.copy(threePointConfig = config) }
+
+        // Workswitch auto-engage logic when dropping into ground work
+        if (config.autoWorkswitchEnabled) {
+            if (config.currentHeightPercent <= config.targetWorkDepthPercent && prevHeight > config.targetWorkDepthPercent) {
+                // Fired THREE_POINT_DROP trigger
+                fireCabTrigger(CabTrigger.THREE_POINT_DROP)
+            } else if (config.currentHeightPercent >= config.targetHeadlandRaisePercent && prevHeight < config.targetHeadlandRaisePercent) {
+                // Fired THREE_POINT_RAISE trigger
+                fireCabTrigger(CabTrigger.THREE_POINT_RAISE)
+            }
+        }
+    }
+
+    fun setThreePointState(state: ThreePointState) {
+        val config = _uiState.value.threePointConfig
+        val targetHeight = when (state) {
+            ThreePointState.LOWERED -> config.targetWorkDepthPercent
+            ThreePointState.RAISED -> config.targetHeadlandRaisePercent
+            ThreePointState.FLOAT -> 0
+            ThreePointState.TRANSPORT -> 100
+        }
+        updateThreePointConfig(config.copy(state = state, currentHeightPercent = targetHeight))
+        vibrateHaptic(60)
+    }
+
+    fun toggleThreePointHitch() {
+        val current = _uiState.value.threePointConfig.state
+        val next = if (current == ThreePointState.LOWERED) ThreePointState.RAISED else ThreePointState.LOWERED
+        setThreePointState(next)
+    }
+
+    fun setScvState(valveId: Int, state: ScvValveState) {
+        _uiState.update { current ->
+            val updated = current.scvValves.map { v ->
+                if (v.id == valveId) v.copy(state = state) else v
+            }
+            current.copy(
+                scvValves = updated,
+                statusMessage = "SCV $valveId → ${state.label}"
+            )
+        }
+        vibrateHaptic(50)
+    }
+
+    fun updateScvValve(valve: ScvValve) {
+        _uiState.update { current ->
+            val updated = current.scvValves.map { if (it.id == valve.id) valve else it }
+            current.copy(scvValves = updated)
+        }
+    }
+
+    fun saveTriggerBinding(binding: TriggerBinding) {
+        _uiState.update { current ->
+            val filtered = current.triggerBindings.filter { it.id != binding.id }
+            val newId = if (binding.id == 0L) System.currentTimeMillis() else binding.id
+            current.copy(
+                triggerBindings = filtered + binding.copy(id = newId),
+                statusMessage = "Mapped Trigger: '${binding.trigger.title}' → ${binding.action.title}"
+            )
+        }
+        vibrateHaptic(50)
+    }
+
+    fun deleteTriggerBinding(id: Long) {
+        _uiState.update { current ->
+            current.copy(
+                triggerBindings = current.triggerBindings.filter { it.id != id },
+                statusMessage = "Keybinding Removed"
+            )
+        }
+    }
+
+    fun resetDefaultTriggerBindings() {
+        _uiState.update {
+            it.copy(
+                triggerBindings = HydraulicDefaults.createDefaultTriggerBindings(),
+                scvValves = HydraulicDefaults.createDefaultValves(),
+                statusMessage = "Reset Default SCV & 3-Point Triggers"
+            )
+        }
+        vibrateHaptic(80)
+    }
+
+    fun triggerSoftKey(index: Int) {
+        val trigger = when (index) {
+            1 -> CabTrigger.SOFTKEY_1
+            2 -> CabTrigger.SOFTKEY_2
+            3 -> CabTrigger.SOFTKEY_3
+            4 -> CabTrigger.SOFTKEY_4
+            5 -> CabTrigger.SOFTKEY_5
+            6 -> CabTrigger.SOFTKEY_6
+            else -> return
+        }
+        fireCabTrigger(trigger)
+    }
+
+    fun fireCabTrigger(trigger: CabTrigger) {
+        val bindings = _uiState.value.triggerBindings.filter { it.trigger == trigger && it.isEnabled }
+        for (b in bindings) {
+            if (b.delayMs > 0) {
+                viewModelScope.launch {
+                    delay(b.delayMs)
+                    executeCabAction(b.action)
+                }
+            } else {
+                executeCabAction(b.action)
+            }
+        }
+    }
+
+    fun executeCabAction(action: CabAction) {
+        when (action) {
+            CabAction.LOWER_3_POINT -> setThreePointState(ThreePointState.LOWERED)
+            CabAction.RAISE_3_POINT -> setThreePointState(ThreePointState.RAISED)
+            CabAction.TOGGLE_3_POINT -> toggleThreePointHitch()
+            CabAction.EXTEND_SCV_1 -> setScvState(1, ScvValveState.EXTEND)
+            CabAction.RETRACT_SCV_1 -> setScvState(1, ScvValveState.RETRACT)
+            CabAction.FLOAT_SCV_1 -> setScvState(1, ScvValveState.FLOAT)
+            CabAction.EXTEND_SCV_2 -> setScvState(2, ScvValveState.EXTEND)
+            CabAction.RETRACT_SCV_2 -> setScvState(2, ScvValveState.RETRACT)
+            CabAction.EXTEND_SCV_3 -> setScvState(3, ScvValveState.EXTEND)
+            CabAction.RETRACT_SCV_3 -> setScvState(3, ScvValveState.RETRACT)
+            CabAction.EXTEND_SCV_4 -> setScvState(4, ScvValveState.EXTEND)
+            CabAction.RETRACT_SCV_4 -> setScvState(4, ScvValveState.RETRACT)
+            CabAction.TOGGLE_AUTO_STEER -> toggleAutoSteer()
+            CabAction.TOGGLE_SECTION_MASTER -> toggleAutoSectionControl()
+            CabAction.TOGGLE_CULTIVATOR_SPLIT -> toggleCultivatorSplitPass()
+            CabAction.NUDGE_HALF_ROW_11_INCH -> nudgeHalfRow22Inch(false)
+            CabAction.NUDGE_FULL_ROW_22_INCH -> nudgeFullRow22Inch(true)
+            CabAction.EXECUTE_HEADLAND_SEQUENCE -> triggerManualUTurn()
+            CabAction.SNAP_AB_LINE -> snapABLineToVehicle()
+            CabAction.CENTER_GPS -> recenterOriginToCurrentGps()
+            CabAction.CYCLE_THEME -> cycleThemeMode()
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         simJob?.cancel()
+        topographyRepo.shutdown()
         usbManager.unregisterReceiver()
         usbManager.disconnect()
         udpManager.stop()
@@ -3090,3 +4096,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopAndroidLocationUpdates()
     }
 }
+

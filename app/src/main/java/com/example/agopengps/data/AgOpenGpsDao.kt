@@ -73,4 +73,43 @@ interface AgOpenGpsDao {
 
     @Query("DELETE FROM implement_profiles WHERE id = :profileId")
     suspend fun deleteImplementProfile(profileId: Long)
+
+    // --- RECORDED PATHS / EXACT TRACK MEMORY ---
+    @Query("SELECT * FROM recorded_paths WHERE fieldId = :fieldId ORDER BY createdAt DESC")
+    fun getRecordedPathsForField(fieldId: Long): Flow<List<RecordedPathEntity>>
+
+    @Query("SELECT * FROM recorded_paths WHERE fieldId = :fieldId ORDER BY createdAt DESC")
+    suspend fun getRecordedPathsForFieldSync(fieldId: Long): List<RecordedPathEntity>
+
+    @Query("SELECT * FROM recorded_paths ORDER BY createdAt DESC")
+    fun getAllRecordedPaths(): Flow<List<RecordedPathEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRecordedPath(path: RecordedPathEntity): Long
+
+    @Query("DELETE FROM recorded_paths WHERE id = :pathId")
+    suspend fun deleteRecordedPath(pathId: Long)
+
+    @Query("DELETE FROM recorded_paths WHERE fieldId = :fieldId")
+    suspend fun deleteRecordedPathsForField(fieldId: Long)
+
+    // --- GAMEPAD / CONTROLLER BINDINGS ---
+    @Query("SELECT * FROM gamepad_bindings ORDER BY id ASC")
+    fun getAllGamepadBindings(): Flow<List<GamepadBindingEntity>>
+
+    @Query("SELECT * FROM gamepad_bindings ORDER BY id ASC")
+    suspend fun getAllGamepadBindingsSync(): List<GamepadBindingEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGamepadBinding(binding: GamepadBindingEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGamepadBindings(bindings: List<GamepadBindingEntity>)
+
+    @Query("DELETE FROM gamepad_bindings WHERE id = :bindingId")
+    suspend fun deleteGamepadBinding(bindingId: Long)
+
+    @Query("DELETE FROM gamepad_bindings")
+    suspend fun clearAllGamepadBindings()
 }
+

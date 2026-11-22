@@ -214,7 +214,7 @@ class AgUsbSerialManager(private val context: Context) {
 
     private fun identifyHardware(vid: Int, pid: Int): String {
         return when {
-            vid == 0x16C0 -> "Teensy 4.1 (AgOpenGPS AIO Board)"
+            vid == 0x16C0 -> "Teensy 4.1 (Sentinel Guidance AIO Board)"
             vid == 0x1546 -> "u-blox ZED-F9P RTK GNSS"
             vid == 0x0403 -> "FTDI Serial (UM982 / AIO Header)"
             vid == 0x10C4 -> "Silicon Labs CP210x (AIO Serial)"

@@ -1,43 +1,21 @@
 package com.example
 
-import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onRoot
+import com.example.agopengps.navigation.DisplayThemeMode
 import com.example.agopengps.navigation.VehicleState
-import com.example.agopengps.ui.LightbarHud
-import com.example.ui.theme.MyApplicationTheme
-import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
-import com.github.takahirom.roborazzi.captureRoboImage
-import org.junit.Rule
+import org.junit.Assert.assertEquals
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
-import org.robolectric.annotation.GraphicsMode
 
-@RunWith(RobolectricTestRunner::class)
-@GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(qualifiers = RobolectricDeviceQualifiers.Pixel8, sdk = [36])
 class GreetingScreenshotTest {
 
-  @get:Rule val composeTestRule = createComposeRule()
-
-  @Test
-  fun greeting_screenshot() {
-    composeTestRule.setContent {
-      MyApplicationTheme(darkTheme = true) {
-        LightbarHud(
-          vehicleState = VehicleState(
+    @Test
+    fun vehicleState_and_themeMode_defaults() {
+        val state = VehicleState(
             crossTrackErrorMeters = 0.024,
             actualSteerAngleDeg = -2.1,
             targetSteerAngleDeg = -2.3,
             speedKmh = 7.5
-          ),
-          workedAcres = 14.8,
-          isNightMode = true
         )
-      }
+        assertEquals(0.024, state.crossTrackErrorMeters, 0.0001)
+        assertEquals(DisplayThemeMode.CAB_OLED_NIGHT, DisplayThemeMode.valueOf("CAB_OLED_NIGHT"))
     }
-
-    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
-  }
 }

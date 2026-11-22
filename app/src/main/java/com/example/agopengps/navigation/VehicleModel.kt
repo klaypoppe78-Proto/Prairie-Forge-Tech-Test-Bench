@@ -52,7 +52,7 @@ enum class GnssReceiverType(val label: String) {
     AUTO_DETECT("Auto-Detect Receiver"),
     UNICORE_UM982("Unicore UM982 (Dual-Antenna RTK Heading)"),
     UBLOX_F9P("u-blox ZED-F9P (RTK GNSS)"),
-    AGOPENGPS_PAOGI("AgOpenGPS AIO Fused (\$PAOGI)")
+    AGOPENGPS_PAOGI("Sentinel Guidance AIO Fused (\$PAOGI)")
 }
 
 /**
@@ -142,7 +142,10 @@ data class GuidanceSettings(
     val tabletGpsLookaheadSec: Double = 3.0,    // Extended lookahead time for Tablet GPS WAAS (1.5s - 5.0s)
     val deadbandCm: Double = 2.0,               // Steer deadband in centimeters
     val rollZeroOffsetDeg: Double = 0.0,        // Calibration zero point for cab roll IMU
-    val terrainSideDraftGain: Double = 0.4      // Degrees uphill steer per degree of side-hill roll
+    val terrainSideDraftGain: Double = 0.4,     // Degrees uphill steer per degree of side-hill roll
+    val steeringAggressionPercent: Int = 100,   // Steering aggression / sensitivity (50% - 200%, default 100%)
+    val operatorOverrideSensitivityDeg: Double = 2.5, // Steering angle divergence threshold to disengage autosteer ASAP
+    val isOperatorOverrideEnabled: Boolean = true // Automatic disengage when operator moves steering wheel
 )
 
 /**

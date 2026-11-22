@@ -1,6 +1,14 @@
 {
-  "name": "AgOpenGPS",
-  "description": "Native Android tractor auto-steer guidance system with Stanley & Pure Pursuit navigation, AB lines, section control, and RTK/NMEA UDP connectivity.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "name": "Sentinel Guidance",
+  "description": "Professional In-Cab Precision Guidance, RTK Autosteer, 22-Inch Organic Row-Crop Cultivator Splitter & 0.5-Mile Topography for Android.",
+  "requestFramePermissions": [
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.INTERNET",
+    "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.VIBRATE"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

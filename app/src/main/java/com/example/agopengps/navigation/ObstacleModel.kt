@@ -41,9 +41,9 @@ data class FieldObstacle(
  * In-Cab display theme mode.
  */
 enum class DisplayThemeMode(val label: String, val shortName: String) {
-    STANDARD_AG("AgOpenGPS Emerald", "STD"),
-    SUNLIGHT_HIGH_CONTRAST("Sunlight High-Contrast", "SUN"),
-    CAB_OLED_NIGHT("OLED Cab Night", "NIGHT")
+    STANDARD_AG("Sentinel Guidance Emerald", "EMERALD"),
+    CAB_OLED_NIGHT("OLED Red/Amber Cab Night", "RED/AMBER"),
+    SUNLIGHT_HIGH_CONTRAST("Sunlight High-Contrast", "SUNLIGHT")
 }
 
 /**

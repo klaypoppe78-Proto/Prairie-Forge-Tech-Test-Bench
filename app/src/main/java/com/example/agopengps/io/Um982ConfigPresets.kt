@@ -20,7 +20,7 @@ object Um982ConfigPresets {
      */
     val COMMAND_PRESETS = listOf(
         Um982Command(
-            label = "10Hz AgOpenGPS Dual Mode",
+            label = "10Hz Sentinel Guidance Dual Mode",
             description = "Enables \$KSXT, \$GNGGA, \$GNVTG at 10Hz (0.1s) for standard Teensy AIO guidance.",
             commandString = "CONFIG NMEA KSXT 0.1\r\nCONFIG NMEA GNGGA 0.1\r\nCONFIG NMEA GNVTG 0.1\r\n"
         ),

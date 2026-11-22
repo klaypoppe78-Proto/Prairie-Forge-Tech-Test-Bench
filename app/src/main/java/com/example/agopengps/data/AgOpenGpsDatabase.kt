@@ -11,10 +11,12 @@ import androidx.room.RoomDatabase
         CoveredPassEntity::class,
         ABLineEntity::class,
         VehicleProfileEntity::class,
-        ObstacleEntity::class,
-        ImplementProfileEntity::class
+        FieldObstacleEntity::class,
+        ImplementProfileEntity::class,
+        RecordedPathEntity::class,
+        GamepadBindingEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AgOpenGpsDatabase : RoomDatabase() {
@@ -30,7 +32,7 @@ abstract class AgOpenGpsDatabase : RoomDatabase() {
                     context.applicationContext,
                     AgOpenGpsDatabase::class.java,
                     "agopengps_database.db"
-                ).fallbackToDestructiveMigration(dropAllTables = true).build()
+                ).fallbackToDestructiveMigration().build()
                 INSTANCE = instance
                 instance
             }

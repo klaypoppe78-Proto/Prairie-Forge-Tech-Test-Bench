@@ -2,738 +2,45 @@ package com.example.agopengps.navigation
 
 import kotlin.math.*
 
-enum class SectionOverride {
-    AUTO,
-    FORCED_ON,
-    FORCED_OFF
-}
-
-/**
- * Representation of an AB Guidance Line.
- */
 data class ABLine(
-    val id: Long = 0,
-    val name: String = "AB Line 1",
     val aLocal: Vec2,
     val bLocal: Vec2,
-    val headingDeg: Double,
     val aGeo: GeoPoint,
     val bGeo: GeoPoint,
-    val isAPlusLine: Boolean = false
+    val headingDeg: Double,
+    val dirVector: Vec2,
+    val normalVector: Vec2,
+    val name: String = "AB Line"
 ) {
-    val dirVector: Vec2
-    val normalVector: Vec2
-
-    init {
-        val headingRad = Math.toRadians(headingDeg)
-        dirVector = Vec2(sin(headingRad), cos(headingRad))
-        normalVector = dirVector.perpClockwise()
-    }
+    val directionVector: Vec2 get() = dirVector
 
     companion object {
         fun fromPoints(aLocal: Vec2, bLocal: Vec2, aGeo: GeoPoint, bGeo: GeoPoint, name: String = "AB Line"): ABLine {
-            val dx = bLocal.x - aLocal.x
-            val dy = bLocal.y - aLocal.y
-            val headingRad = atan2(dx, dy)
+            val dir = (bLocal - aLocal).normalized()
+            val headingRad = atan2(dir.x, dir.y)
             val headingDeg = (Math.toDegrees(headingRad) + 360.0) % 360.0
-            return ABLine(
-                name = name,
-                aLocal = aLocal,
-                bLocal = bLocal,
-                headingDeg = headingDeg,
-                aGeo = aGeo,
-                bGeo = bGeo,
-                isAPlusLine = false
-            )
+            val normal = dir.perpClockwise()
+            return ABLine(aLocal, bLocal, aGeo, bGeo, headingDeg, dir, normal, name)
         }
 
-        fun fromAPlus(aLocal: Vec2, headingDeg: Double, aGeo: GeoPoint, name: String = "A+ Line"): ABLine {
+        fun fromAPlus(aLocal: Vec2, headingDeg: Double, aGeo: GeoPoint, name: String = "A+ Heading Line"): ABLine {
             val headingRad = Math.toRadians(headingDeg)
             val dir = Vec2(sin(headingRad), cos(headingRad))
-            val bLocal = aLocal + (dir * 100.0)
-            val bGeo = GeoUtils.localMetersToGeo(bLocal, aGeo)
-            return ABLine(
-                name = name,
-                aLocal = aLocal,
-                bLocal = bLocal,
-                headingDeg = (headingDeg + 360.0) % 360.0,
-                aGeo = aGeo,
-                bGeo = bGeo,
-                isAPlusLine = true
-            )
+            val bLocal = aLocal + (dir * 1000.0)
+            val bGeo = GeoUtils.localMetersToGeo(dir * 1000.0, aGeo)
+            val normal = dir.perpClockwise()
+            return ABLine(aLocal, bLocal, aGeo, bGeo, headingDeg, dir, normal, name)
+        }
+
+        fun fromPointAndHeading(aLocal: Vec2, aGeo: GeoPoint, headingDeg: Double, name: String = "A+ Heading Line"): ABLine {
+            return fromAPlus(aLocal, headingDeg, aGeo, name)
         }
     }
 }
 
-/**
- * Representation of an AgOpenGPS Curved / Contour Guidance line.
- */
 data class CurveLine(
-    val id: Long = 0,
-    val name: String = "Curve Line 1",
-    val points: List<Vec2> = emptyList()
-)
-
-/**
- * Core navigation, terrain compensation, and steering algorithms ported from AgOpenGPS.
- */
-object GuidanceAlgorithms {
-
-    /**
-     * Terrain Roll and Antenna Offset Compensation.
-     */
-    fun compensateAntennaPosition(
-        antennaLocal: Vec2,
-        headingDeg: Double,
-        rollDeg: Double,
-        vehicle: VehicleConfig,
-        rollZeroOffset: Double = 0.0
-    ): Vec2 {
-        val effectiveRoll = rollDeg - rollZeroOffset
-        val rollRad = Math.toRadians(effectiveRoll)
-        val headingRad = Math.toRadians(headingDeg)
-
-        // Lateral antenna shift due to cab roll (antenna height * sin(roll))
-        val rollShiftDistance = vehicle.antennaHeight * sin(rollRad)
-
-        // Perpendicular vector to heading pointing left (counter-clockwise)
-        val headingDir = Vec2(sin(headingRad), cos(headingRad))
-        val leftPerp = headingDir.perpCounterClockwise()
-
-        val rollCompensated = antennaLocal + (leftPerp * rollShiftDistance)
-        return rollCompensated - (headingDir * vehicle.antennaPivotOffset)
-    }
-
-    /**
-     * Compensates internal tablet accelerometer roll for lateral centrifugal acceleration in sharp turns.
-     * a_lat = v * omega (m/s * rad/s).
-     * Gravity g = 9.80665 m/s^2.
-     * Corrected lateral tilt = accel_lat - (v * omega).
-     */
-    fun calculateCentrifugalCompensatedRoll(
-        rawAccelRollDeg: Double,
-        speedKmh: Double,
-        yawRateRadPerSec: Double
-    ): Double {
-        val speedMps = speedKmh / 3.6
-        val g = 9.80665
-        val centrifugalAccel = speedMps * yawRateRadPerSec
-        // Centrifugal tilt error in radians ~ centrifugalAccel / g
-        val centrifugalAngleRad = atan2(centrifugalAccel, g)
-        val centrifugalAngleDeg = Math.toDegrees(centrifugalAngleRad)
-        return rawAccelRollDeg - centrifugalAngleDeg
-    }
-
-    /**
-     * Translates internal Android device/tablet GPS antenna position to the tractor rear axle pivot
-     * using the user-calibrated 3D mounting offset (X lateral, Y forward, Z height) and terrain roll.
-     */
-    fun compensateTabletPosition(
-        tabletLocal: Vec2,
-        headingDeg: Double,
-        rollDeg: Double,
-        vehicle: VehicleConfig,
-        rollZeroOffset: Double = 0.0
-    ): Vec2 {
-        val effectiveRoll = rollDeg - rollZeroOffset
-        val rollRad = Math.toRadians(effectiveRoll)
-        val headingRad = Math.toRadians(headingDeg)
-
-        // Lateral antenna shift due to cab roll (tablet height * sin(roll))
-        val rollShiftDistance = vehicle.tabletHeightAboveAxle * sin(rollRad)
-
-        val headingDir = Vec2(sin(headingRad), cos(headingRad))
-        val rightPerp = headingDir.perpClockwise()
-        val leftPerp = headingDir.perpCounterClockwise()
-
-        // 1. Compensate cab roll tilt
-        val rollCompensated = tabletLocal + (leftPerp * rollShiftDistance)
-        // 2. Subtract tablet mount offsets (forward of axle, right of centerline)
-        return rollCompensated - (headingDir * vehicle.tabletForwardOffset) - (rightPerp * vehicle.tabletRightOffset)
-    }
-
-    /**
-     * Finds the nearest parallel swath pass and calculates cross-track and heading errors for an AB line.
-     */
-    fun calculateSwathTracking(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        abLine: ABLine,
-        swathWidth: Double
-    ): SwathResult {
-        val toPivot = pivotPosition - abLine.aLocal
-        val perpDist = toPivot.dot(abLine.normalVector)
-
-        // Calculate swath index N (integer pass number)
-        val swathIndex = round(perpDist / swathWidth).toInt()
-        val swathOrigin = abLine.aLocal + (abLine.normalVector * (swathIndex * swathWidth))
-
-        val deltaHeading = GeoUtils.normalizeAngleDeg(tractorHeadingDeg - abLine.headingDeg)
-        val isReversePass = abs(deltaHeading) > 90.0
-
-        val targetHeadingDeg: Double
-        val activeNormal: Vec2
-        val activeDir: Vec2
-
-        if (isReversePass) {
-            targetHeadingDeg = (abLine.headingDeg + 180.0) % 360.0
-            activeDir = abLine.dirVector * -1.0
-            activeNormal = activeDir.perpClockwise()
-        } else {
-            targetHeadingDeg = abLine.headingDeg
-            activeDir = abLine.dirVector
-            activeNormal = abLine.normalVector
-        }
-
-        val toPivotActive = pivotPosition - swathOrigin
-        val crossTrackError = toPivotActive.dot(activeNormal)
-        val headingErrorDeg = GeoUtils.normalizeAngleDeg(tractorHeadingDeg - targetHeadingDeg)
-        val projectedOnSwath = pivotPosition.projectOntoLine(swathOrigin, activeDir)
-
-        return SwathResult(
-            activeSwathIndex = swathIndex,
-            swathOrigin = swathOrigin,
-            swathDir = activeDir,
-            crossTrackErrorMeters = crossTrackError,
-            headingErrorDeg = headingErrorDeg,
-            targetHeadingDeg = targetHeadingDeg,
-            projectedPoint = projectedOnSwath,
-            isReversePass = isReversePass
-        )
-    }
-
-    /**
-     * Curved / Contour Swath Tracking Algorithm (AgOpenGPS Curve Mode).
-     * Finds closest segment along a polyline and computes offset curve guidance.
-     */
-    fun calculateCurveTracking(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        curveLine: CurveLine,
-        swathWidth: Double
-    ): SwathResult? {
-        val pts = curveLine.points
-        if (pts.size < 2) return null
-
-        var bestDistSq = Double.MAX_VALUE
-        var bestSegIdx = 0
-        var bestProj = pts[0]
-
-        for (i in 0 until pts.size - 1) {
-            val p0 = pts[i]
-            val p1 = pts[i + 1]
-            val segVec = p1 - p0
-            val segLenSq = segVec.lengthSquared()
-            if (segLenSq < 1e-4) continue
-
-            val t = ((pivotPosition - p0).dot(segVec) / segLenSq).coerceIn(0.0, 1.0)
-            val proj = p0 + (segVec * t)
-            val distSq = pivotPosition.distanceTo(proj).let { it * it }
-
-            if (distSq < bestDistSq) {
-                bestDistSq = distSq
-                bestSegIdx = i
-                bestProj = proj
-            }
-        }
-
-        val p0 = pts[bestSegIdx]
-        val p1 = pts[bestSegIdx + 1]
-        val segDir = (p1 - p0).normalized()
-        val segNormal = segDir.perpClockwise()
-
-        val toPivot = pivotPosition - bestProj
-        val perpDist = toPivot.dot(segNormal)
-        val passIndex = round(perpDist / swathWidth).toInt()
-        val offsetProj = bestProj + (segNormal * (passIndex * swathWidth))
-
-        val segHeadingRad = atan2(segDir.x, segDir.y)
-        val segHeadingDeg = (Math.toDegrees(segHeadingRad) + 360.0) % 360.0
-
-        val deltaHeading = GeoUtils.normalizeAngleDeg(tractorHeadingDeg - segHeadingDeg)
-        val isReverse = abs(deltaHeading) > 90.0
-
-        val targetHeading = if (isReverse) (segHeadingDeg + 180.0) % 360.0 else segHeadingDeg
-        val activeDir = if (isReverse) segDir * -1.0 else segDir
-        val activeNormal = activeDir.perpClockwise()
-
-        val cte = (pivotPosition - offsetProj).dot(activeNormal)
-        val headingError = GeoUtils.normalizeAngleDeg(tractorHeadingDeg - targetHeading)
-
-        return SwathResult(
-            activeSwathIndex = passIndex,
-            swathOrigin = offsetProj,
-            swathDir = activeDir,
-            crossTrackErrorMeters = cte,
-            headingErrorDeg = headingError,
-            targetHeadingDeg = targetHeading,
-            projectedPoint = offsetProj,
-            isReversePass = isReverse
-        )
-    }
-
-    /**
-     * Stanley Steering Control Law (AgOpenGPS core steering engine).
-     */
-    fun calculateStanleySteering(
-        crossTrackErrorMeters: Double,
-        headingErrorDeg: Double,
-        speedKmh: Double,
-        settings: GuidanceSettings,
-        vehicle: VehicleConfig,
-        integralAccumulator: Double = 0.0
-    ): Double {
-        val speedMps = max(speedKmh / 3.6, 0.1)
-        val headingErrorRad = Math.toRadians(headingErrorDeg)
-
-        val deadbandMeters = settings.deadbandCm / 100.0
-        val effectiveError = when {
-            abs(crossTrackErrorMeters) <= deadbandMeters -> 0.0
-            crossTrackErrorMeters > 0 -> crossTrackErrorMeters - deadbandMeters
-            else -> crossTrackErrorMeters + deadbandMeters
-        }
-
-        val crossTrackCorrectionRad = -atan2(settings.stanleyGain * effectiveError, speedMps + 0.5)
-        val headingCorrectionRad = -headingErrorRad
-        val integralCorrectionRad = -settings.stanleyIntegralGain * integralAccumulator
-
-        val targetSteerRad = headingCorrectionRad + crossTrackCorrectionRad + integralCorrectionRad
-        val targetSteerDeg = Math.toDegrees(targetSteerRad)
-
-        return targetSteerDeg.coerceIn(-vehicle.maxSteerAngleDeg, vehicle.maxSteerAngleDeg)
-    }
-
-    /**
-     * Pure Pursuit Steering Controller.
-     */
-    fun calculatePurePursuitSteering(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        swathOrigin: Vec2,
-        swathDir: Vec2,
-        speedKmh: Double,
-        settings: GuidanceSettings,
-        vehicle: VehicleConfig,
-        lookaheadTimeOverrideSec: Double? = null
-    ): Double {
-        val speedMps = max(speedKmh / 3.6, 0.2)
-        val lookaheadTime = lookaheadTimeOverrideSec ?: settings.purePursuitLookaheadGain
-
-        val lookaheadDist = (speedMps * lookaheadTime)
-            .coerceIn(settings.purePursuitMinLookahead, settings.purePursuitMaxLookahead)
-
-        val proj = pivotPosition.projectOntoLine(swathOrigin, swathDir)
-        val lookaheadTarget = proj + (swathDir * lookaheadDist)
-
-        val toTarget = lookaheadTarget - pivotPosition
-        val targetAngleRad = atan2(toTarget.x, toTarget.y)
-        val targetAngleDeg = (Math.toDegrees(targetAngleRad) + 360.0) % 360.0
-
-        val alphaDeg = GeoUtils.normalizeAngleDeg(targetAngleDeg - tractorHeadingDeg)
-        val alphaRad = Math.toRadians(alphaDeg)
-
-        val actualLookahead = toTarget.length().coerceAtLeast(1.0)
-        val curvature = (2.0 * sin(alphaRad)) / actualLookahead
-
-        val steerAngleRad = atan(curvature * vehicle.wheelbase)
-        val steerAngleDeg = Math.toDegrees(steerAngleRad)
-
-        return steerAngleDeg.coerceIn(-vehicle.maxSteerAngleDeg, vehicle.maxSteerAngleDeg)
-    }
-
-    /**
-     * Calculates implement boom coordinates and section status with manual override support.
-     */
-    fun calculateImplementSections(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        vehicle: VehicleConfig,
-        implement: ImplementConfig,
-        fieldBoundary: List<Vec2>?,
-        appliedPolygons: List<AppliedSwathSegment>,
-        sectionOverrides: List<SectionOverride> = emptyList(),
-        spatialGrid: CoverageSpatialGrid? = null
-    ): ImplementStatus {
-        val headingRad = Math.toRadians(tractorHeadingDeg)
-        val forwardDir = Vec2(sin(headingRad), cos(headingRad))
-        val rightDir = forwardDir.perpClockwise()
-
-        // 3-point hitch toolbar vs trailing toolbar hitch kinematics
-        val toolbarDistanceBehindPivot = vehicle.hitchLength - implement.offsetBehindTractor
-        val toolBarCenter = pivotPosition + (forwardDir * toolbarDistanceBehindPivot)
-        val hitchPinPos = pivotPosition + (forwardDir * vehicle.hitchLength)
-
-        val sectionSpans = implement.getSectionSpans()
-        val sectionPoints = mutableListOf<SectionBoomPosition>()
-        val sectionActive = mutableListOf<Boolean>()
-
-        for (i in sectionSpans.indices) {
-            val (leftOffset, rightOffset) = sectionSpans[i]
-            val leftPos = toolBarCenter + (rightDir * leftOffset)
-            val rightPos = toolBarCenter + (rightDir * rightOffset)
-            val centerPos = (leftPos + rightPos) * 0.5
-
-            sectionPoints.add(SectionBoomPosition(i, leftPos, rightPos, centerPos))
-
-            val override = sectionOverrides.getOrNull(i) ?: SectionOverride.AUTO
-
-            when (override) {
-                SectionOverride.FORCED_ON -> sectionActive.add(true)
-                SectionOverride.FORCED_OFF -> sectionActive.add(false)
-                SectionOverride.AUTO -> {
-                    if (!implement.isMasterActive) {
-                        sectionActive.add(false)
-                    } else if (!implement.isAutoSectionControl) {
-                        sectionActive.add(true)
-                    } else {
-                        val insideBoundary = fieldBoundary == null || isPointInPolygon(centerPos, fieldBoundary)
-                        val alreadyCovered = isPointCovered(centerPos, appliedPolygons, spatialGrid)
-                        sectionActive.add(insideBoundary && !alreadyCovered)
-                    }
-                }
-            }
-        }
-
-        return ImplementStatus(
-            hitchPosition = hitchPinPos,
-            sections = sectionPoints,
-            sectionStates = sectionActive
-        )
-    }
-
-    /**
-     * Calculates exact polygon area using Shoelace formula. Returns square meters.
-     */
-    fun calculatePolygonAreaM2(polygon: List<Vec2>): Double {
-        if (polygon.size < 3) return 0.0
-        var area = 0.0
-        var j = polygon.size - 1
-        for (i in polygon.indices) {
-            area += (polygon[j].x + polygon[i].x) * (polygon[j].y - polygon[i].y)
-            j = i
-        }
-        return abs(area * 0.5)
-    }
-
-    /**
-     * Calculates inner headland polygon offset by distance (meters).
-     */
-    fun generateHeadlandPolygon(boundary: List<Vec2>, offsetDistanceMeters: Double): List<Vec2> {
-        if (boundary.size < 3 || offsetDistanceMeters <= 0.0) return emptyList()
-        val headland = mutableListOf<Vec2>()
-        val n = boundary.size
-        for (i in 0 until n) {
-            val prev = boundary[(i - 1 + n) % n]
-            val curr = boundary[i]
-            val next = boundary[(i + 1) % n]
-
-            val v1 = (curr - prev).normalized()
-            val v2 = (next - curr).normalized()
-
-            // Inward normal
-            val n1 = v1.perpCounterClockwise()
-            val n2 = v2.perpCounterClockwise()
-
-            val bisector = (n1 + n2).normalized()
-            val cosHalf = bisector.dot(n1)
-            val d = if (abs(cosHalf) > 0.1) offsetDistanceMeters / cosHalf else offsetDistanceMeters
-
-            headland.add(curr + (bisector * d))
-        }
-        return headland
-    }
-
-    /**
-     * Calculates turn arc (Dubins turn path) from current swath to next swath at field boundary.
-     */
-    fun generateUTurnPath(
-        currentSwathEnd: Vec2,
-        currentHeadingDeg: Double,
-        nextSwathStart: Vec2,
-        turnRadiusMeters: Double
-    ): List<Vec2> {
-        val path = mutableListOf<Vec2>()
-        val headRad = Math.toRadians(currentHeadingDeg)
-        val forwardDir = Vec2(sin(headRad), cos(headRad))
-
-        // Determine if next swath is to the right or left
-        val toNext = nextSwathStart - currentSwathEnd
-        val normal = forwardDir.perpClockwise()
-        val isRightTurn = toNext.dot(normal) >= 0
-
-        val turnSign = if (isRightTurn) 1.0 else -1.0
-        val center = currentSwathEnd + (normal * (turnSign * turnRadiusMeters))
-
-        val steps = 18
-        for (i in 0..steps) {
-            val angle = headRad - (turnSign * (PI * (i.toDouble() / steps.toDouble())))
-            val pt = center + Vec2(-sin(angle) * turnRadiusMeters * turnSign, cos(angle) * turnRadiusMeters)
-            path.add(pt)
-        }
-        path.add(nextSwathStart)
-        return path
-    }
-
-    fun isPointInPolygon(point: Vec2, polygon: List<Vec2>): Boolean {
-        if (polygon.size < 3) return true
-        var inside = false
-        var j = polygon.size - 1
-        for (i in polygon.indices) {
-            val pi = polygon[i]
-            val pj = polygon[j]
-            if ((pi.y > point.y) != (pj.y > point.y) &&
-                point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x
-            ) {
-                inside = !inside
-            }
-            j = i
-        }
-        return inside
-    }
-
-    /**
-     * Calculates speed-adaptive lookahead distance to provide snappy low-speed line acquisition
-     * without high-speed oscillation or line hunting.
-     */
-    fun calculateSpeedAdaptiveLookahead(
-        speedKmh: Double,
-        baseLookaheadSec: Double = 0.85,
-        minLookaheadMeters: Double = 2.0,
-        maxLookaheadMeters: Double = 14.0
-    ): Double {
-        val speedMps = max(speedKmh / 3.6, 0.1)
-        val dynamicLookaheadSec = when {
-            speedKmh < 4.0 -> 1.6 // Low-speed tight turn-in responsiveness
-            speedKmh < 9.0 -> baseLookaheadSec.coerceAtLeast(1.0) // Nominal field working speed (4-9 km/h)
-            speedKmh < 16.0 -> baseLookaheadSec * 1.25 // Fast spraying / transport damping
-            else -> baseLookaheadSec * 1.5
-        }
-        return (speedMps * dynamicLookaheadSec).coerceIn(minLookaheadMeters, maxLookaheadMeters)
-    }
-
-    /**
-     * Checks if the tractor or implement is approaching any flagged field obstacle/hazard.
-     * Returns the closest obstacle within the warning threshold (if any).
-     */
-    fun checkObstacleProximity(
-        pivotPosition: Vec2,
-        obstacles: List<FieldObstacle>,
-        warningThresholdMeters: Double = 12.0
-    ): FieldObstacle? {
-        if (obstacles.isEmpty()) return null
-        var closestObs: FieldObstacle? = null
-        var minDistance = Double.MAX_VALUE
-
-        for (obs in obstacles) {
-            val dist = pivotPosition.distanceTo(obs.localPos)
-            val effectiveWarningDistance = obs.radiusMeters + warningThresholdMeters
-            if (dist <= effectiveWarningDistance && dist < minDistance) {
-                minDistance = dist
-                closestObs = obs
-            }
-        }
-        return closestObs
-    }
-
-    /**
-     * Checks if a 2D local point is inside a polygon boundary using ray casting algorithm.
-     */
-    fun isPointInsidePolygon(point: Vec2, polygon: List<Vec2>): Boolean {
-        if (polygon.size < 3) return false
-        var inside = false
-        var j = polygon.size - 1
-        for (i in polygon.indices) {
-            val pi = polygon[i]
-            val pj = polygon[j]
-            if ((pi.y > point.y) != (pj.y > point.y) &&
-                point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x
-            ) {
-                inside = !inside
-            }
-            j = i
-        }
-        return inside
-    }
-
-    /**
-     * Calculates headland turn guidance and directional turn arrow when approaching or crossing headlands.
-     */
-    fun calculateHeadlandTurnGuidance(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        activeSwathIndex: Int,
-        headlandBoundary: List<Vec2>?,
-        swathDir: Vec2
-    ): HeadlandTurnInfo {
-        if (headlandBoundary == null || headlandBoundary.size < 3) {
-            return HeadlandTurnInfo()
-        }
-
-        val distToHeadland = distanceToBoundaryEdge(pivotPosition, headlandBoundary)
-        val isInsideHeadland = isPointInsidePolygon(pivotPosition, headlandBoundary)
-
-        // Approaching headland line within 18 meters or outside
-        val isApproaching = distToHeadland < 18.0 || !isInsideHeadland
-
-        if (!isApproaching) {
-            return HeadlandTurnInfo(
-                direction = TurnDirection.NONE,
-                distanceToTurnMeters = distToHeadland,
-                targetSwathIndex = activeSwathIndex,
-                isApproachingHeadland = false
-            )
-        }
-
-        // Swath perpendicular direction relative to forward motion
-        val headingRad = Math.toRadians(tractorHeadingDeg)
-        val forwardDir = Vec2(sin(headingRad), cos(headingRad))
-        val rightNormal = forwardDir.perpClockwise()
-
-        val dotRight = swathDir.perpClockwise().dot(rightNormal)
-        val turnDir = if (dotRight > 0.0) TurnDirection.TURN_RIGHT else TurnDirection.TURN_LEFT
-
-        return HeadlandTurnInfo(
-            direction = turnDir,
-            distanceToTurnMeters = distToHeadland,
-            targetSwathIndex = activeSwathIndex + 1,
-            isApproachingHeadland = true
-        )
-    }
-
-    /**
-     * Calculates minimum perpendicular distance from a point to any boundary perimeter edge.
-     */
-    fun distanceToBoundaryEdge(point: Vec2, boundary: List<Vec2>): Double {
-        if (boundary.size < 2) return Double.MAX_VALUE
-        var minDist = Double.MAX_VALUE
-        val n = boundary.size
-        for (i in 0 until n) {
-            val a = boundary[i]
-            val b = boundary[(i + 1) % n]
-            val dist = distanceToSegment(point, a, b)
-            if (dist < minDist) {
-                minDist = dist
-            }
-        }
-        return minDist
-    }
-
-    private fun distanceToSegment(p: Vec2, a: Vec2, b: Vec2): Double {
-        val ab = b - a
-        val lenSq = ab.x * ab.x + ab.y * ab.y
-        if (lenSq < 1e-6) return p.distanceTo(a)
-        val t = ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / lenSq
-        val clampedT = t.coerceIn(0.0, 1.0)
-        val proj = a + (ab * clampedT)
-        return p.distanceTo(proj)
-    }
-
-    /**
-     * Exact 2D point-in-convex-polygon test for an applied swath quad segment.
-     * Vertices ordered: leftStart -> rightStart -> rightEnd -> leftEnd.
-     */
-    fun isPointInSegmentQuad(pt: Vec2, seg: AppliedSwathSegment): Boolean {
-        // Fast Axis-Aligned Bounding Box (AABB) rejection with 5cm tolerance
-        val minX = min(min(seg.leftStart.x, seg.rightStart.x), min(seg.leftEnd.x, seg.rightEnd.x)) - 0.05
-        val maxX = max(max(seg.leftStart.x, seg.rightStart.x), max(seg.leftEnd.x, seg.rightEnd.x)) + 0.05
-        val minY = min(min(seg.leftStart.y, seg.rightStart.y), min(seg.leftEnd.y, seg.rightEnd.y)) - 0.05
-        val maxY = max(max(seg.leftStart.y, seg.rightStart.y), max(seg.leftEnd.y, seg.rightEnd.y)) + 0.05
-        if (pt.x < minX || pt.x > maxX || pt.y < minY || pt.y > maxY) return false
-
-        // 2D cross-product point-in-convex-polygon orientation test
-        val c1 = (seg.rightStart.x - seg.leftStart.x) * (pt.y - seg.leftStart.y) - (seg.rightStart.y - seg.leftStart.y) * (pt.x - seg.leftStart.x)
-        val c2 = (seg.rightEnd.x - seg.rightStart.x) * (pt.y - seg.rightStart.y) - (seg.rightEnd.y - seg.rightStart.y) * (pt.x - seg.rightStart.x)
-        val c3 = (seg.leftEnd.x - seg.rightEnd.x) * (pt.y - seg.rightEnd.y) - (seg.leftEnd.y - seg.rightEnd.y) * (pt.x - seg.rightEnd.x)
-        val c4 = (seg.leftStart.x - seg.leftEnd.x) * (pt.y - seg.leftEnd.y) - (seg.leftStart.y - seg.leftEnd.y) * (pt.x - seg.leftEnd.x)
-
-        val hasNeg = (c1 < -1e-5) || (c2 < -1e-5) || (c3 < -1e-5) || (c4 < -1e-5)
-        val hasPos = (c1 > 1e-5) || (c2 > 1e-5) || (c3 > 1e-5) || (c4 > 1e-5)
-        return !(hasNeg && hasPos)
-    }
-
-    /**
-     * Checks if a point is already covered by applied swath passes.
-     * Uses O(1) 2D spatial hash grid if provided, or fallback list iteration.
-     * Excludes recent segments (~80 segments = ~12m travel) so active boom never triggers self-shutoff.
-     */
-    fun isPointCovered(
-        point: Vec2,
-        applied: List<AppliedSwathSegment>,
-        spatialGrid: CoverageSpatialGrid? = null
-    ): Boolean {
-        if (spatialGrid != null) {
-            return spatialGrid.isPointCovered(point)
-        }
-        if (applied.isEmpty()) return false
-        val cutoffIndex = max(0, applied.size - 80)
-        for (k in 0 until cutoffIndex) {
-            val seg = applied[k]
-            if (isPointInSegmentQuad(point, seg)) {
-                return true
-            }
-        }
-        return false
-    }
-
-    fun isPointCovered(point: Vec2, spatialGrid: CoverageSpatialGrid): Boolean {
-        return spatialGrid.isPointCovered(point)
-    }
-
-    /**
-     * Pure Pursuit algorithm targeting a sequential waypoint path (such as Dubins U-Turn arc or curved swath).
-     */
-    fun calculatePurePursuitWaypointsSteering(
-        pivotPosition: Vec2,
-        tractorHeadingDeg: Double,
-        waypoints: List<Vec2>,
-        speedKmh: Double,
-        vehicle: VehicleConfig,
-        lookaheadMeters: Double = 4.0
-    ): Double {
-        if (waypoints.isEmpty()) return 0.0
-        var bestTarget = waypoints.last()
-        for (pt in waypoints) {
-            val dist = pivotPosition.distanceTo(pt)
-            if (dist >= lookaheadMeters) {
-                bestTarget = pt
-                break
-            }
-        }
-        val toTarget = bestTarget - pivotPosition
-        val targetAngleRad = atan2(toTarget.x, toTarget.y)
-        val targetAngleDeg = (Math.toDegrees(targetAngleRad) + 360.0) % 360.0
-        val alphaDeg = GeoUtils.normalizeAngleDeg(targetAngleDeg - tractorHeadingDeg)
-        val alphaRad = Math.toRadians(alphaDeg)
-        val actualDist = toTarget.length().coerceAtLeast(1.0)
-        val curvature = (2.0 * sin(alphaRad)) / actualDist
-        val steerAngleRad = atan(curvature * vehicle.wheelbase)
-        val steerAngleDeg = Math.toDegrees(steerAngleRad)
-        return steerAngleDeg.coerceIn(-vehicle.maxSteerAngleDeg, vehicle.maxSteerAngleDeg)
-    }
-}
-
-data class SwathResult(
-    val activeSwathIndex: Int,
-    val swathOrigin: Vec2,
-    val swathDir: Vec2,
-    val crossTrackErrorMeters: Double,
-    val headingErrorDeg: Double,
-    val targetHeadingDeg: Double,
-    val projectedPoint: Vec2,
-    val isReversePass: Boolean
-)
-
-data class SectionBoomPosition(
-    val index: Int,
-    val left: Vec2,
-    val right: Vec2,
-    val center: Vec2
-)
-
-data class ImplementStatus(
-    val hitchPosition: Vec2,
-    val sections: List<SectionBoomPosition>,
-    val sectionStates: List<Boolean>
+    val name: String,
+    val points: List<Vec2>
 )
 
 data class AppliedSwathSegment(
@@ -745,71 +52,518 @@ data class AppliedSwathSegment(
     val radius: Double
 )
 
-/**
- * 2D Spatial Hash Grid for O(1) field coverage indexing.
- * Maps 15.0-meter grid cells to lists of applied swath segments.
- * When querying isPointCovered(point), only checks segments stored in the active cell and its 8 neighboring cells.
- */
-class CoverageSpatialGrid(val cellSizeMeters: Double = 15.0) {
-    private data class IndexedSegment(val segment: AppliedSwathSegment, val id: Int)
-    private val grid = HashMap<Pair<Int, Int>, MutableList<IndexedSegment>>()
-    private var currentId = 0
-
-    fun clear() {
-        grid.clear()
-        currentId = 0
-    }
-
-    fun addSegment(segment: AppliedSwathSegment) {
-        val id = currentId++
-        val indexed = IndexedSegment(segment, id)
-
-        val minX = min(min(segment.leftStart.x, segment.rightStart.x), min(segment.leftEnd.x, segment.rightEnd.x))
-        val maxX = max(max(segment.leftStart.x, segment.rightStart.x), max(segment.leftEnd.x, segment.rightEnd.x))
-        val minY = min(min(segment.leftStart.y, segment.rightStart.y), min(segment.leftEnd.y, segment.rightEnd.y))
-        val maxY = max(max(segment.leftStart.y, segment.rightStart.y), max(segment.leftEnd.y, segment.rightEnd.y))
-
-        val minGx = floor(minX / cellSizeMeters).toInt()
-        val maxGx = floor(maxX / cellSizeMeters).toInt()
-        val minGy = floor(minY / cellSizeMeters).toInt()
-        val maxGy = floor(maxY / cellSizeMeters).toInt()
-
-        for (gx in minGx..maxGx) {
-            for (gy in minGy..maxGy) {
-                grid.getOrPut(Pair(gx, gy)) { mutableListOf() }.add(indexed)
-            }
-        }
-    }
-
-    fun addAll(segments: List<AppliedSwathSegment>) {
-        for (seg in segments) {
-            addSegment(seg)
-        }
-    }
-
-    fun isPointCovered(point: Vec2): Boolean {
-        if (currentId == 0) return false
-        val gx = floor(point.x / cellSizeMeters).toInt()
-        val gy = floor(point.y / cellSizeMeters).toInt()
-
-        // Exclude recent 80 segments (~12m of travel) to prevent self-overlap shutoff under active boom
-        val cutoffId = currentId - 80
-
-        for (dx in -1..1) {
-            for (dy in -1..1) {
-                val cellList = grid[Pair(gx + dx, gy + dy)] ?: continue
-                for (indexed in cellList) {
-                    if (indexed.id < cutoffId) {
-                        if (GuidanceAlgorithms.isPointInSegmentQuad(point, indexed.segment)) {
-                            return true
-                        }
-                    }
-                }
-            }
-        }
-        return false
-    }
-
-    val size: Int get() = currentId
+enum class SectionOverride {
+    AUTO,
+    FORCED_ON,
+    FORCED_OFF
 }
 
+data class SwathResult(
+    val activeSwathIndex: Int = 0,
+    val swathOrigin: Vec2 = Vec2(),
+    val swathDir: Vec2 = Vec2(0.0, 1.0),
+    val crossTrackErrorMeters: Double = 0.0,
+    val headingErrorDeg: Double = 0.0,
+    val targetHeadingDeg: Double = 0.0,
+    val projectedPoint: Vec2 = Vec2(),
+    val isReversePass: Boolean = false
+)
+
+data class ImplementStatus(
+    val isMasterActive: Boolean,
+    val sectionStates: List<Boolean>,
+    val sections: List<SectionSpan> = emptyList()
+)
+
+data class SectionSpan(
+    val left: Vec2,
+    val right: Vec2
+)
+
+class CoverageSpatialGrid(val cellSizeMeters: Double = 15.0) {
+    private val segments = mutableListOf<AppliedSwathSegment>()
+
+    fun addSegment(seg: AppliedSwathSegment) {
+        segments.add(seg)
+    }
+
+    fun clear() {
+        segments.clear()
+    }
+
+    fun getAll(): List<AppliedSwathSegment> = segments
+}
+
+object GuidanceAlgorithms {
+
+    fun normalizeAngleDeg(angle: Double): Double {
+        var a = angle % 360.0
+        if (a > 180.0) a -= 360.0
+        if (a < -180.0) a += 360.0
+        return a
+    }
+
+    fun compensateAntennaPosition(
+        rawAntennaPos: Vec2,
+        headingDeg: Double,
+        rollDeg: Double,
+        antennaHeight: Double,
+        antennaPivotOffset: Double
+    ): Vec2 {
+        val headingRad = Math.toRadians(headingDeg)
+        val rollRad = Math.toRadians(rollDeg)
+        val lateralOffset = antennaHeight * sin(rollRad)
+        val rightVec = Vec2(cos(headingRad), -sin(headingRad))
+        val fwdVec = Vec2(sin(headingRad), cos(headingRad))
+        return rawAntennaPos - (rightVec * lateralOffset) - (fwdVec * antennaPivotOffset)
+    }
+
+    fun compensateAntennaPosition(
+        antennaLocal: Vec2,
+        headingDeg: Double,
+        rollDeg: Double,
+        vehicle: VehicleConfig,
+        rollZeroOffset: Double = 0.0
+    ): Vec2 {
+        return compensateAntennaPosition(
+            rawAntennaPos = antennaLocal,
+            headingDeg = headingDeg,
+            rollDeg = rollDeg - rollZeroOffset,
+            antennaHeight = vehicle.antennaHeight,
+            antennaPivotOffset = vehicle.antennaPivotOffset
+        )
+    }
+
+    fun compensateTabletPosition(
+        tabletPos: Vec2,
+        headingDeg: Double,
+        rollDeg: Double,
+        tabletHeight: Double,
+        tabletForwardOffset: Double,
+        tabletRightOffset: Double
+    ): Vec2 {
+        val headingRad = Math.toRadians(headingDeg)
+        val rollRad = Math.toRadians(rollDeg)
+        val lateralRollOffset = tabletHeight * sin(rollRad)
+        val rightVec = Vec2(cos(headingRad), -sin(headingRad))
+        val fwdVec = Vec2(sin(headingRad), cos(headingRad))
+        return tabletPos - (rightVec * (tabletRightOffset + lateralRollOffset)) - (fwdVec * tabletForwardOffset)
+    }
+
+    fun compensateTabletPosition(
+        tabletLocal: Vec2,
+        headingDeg: Double,
+        rollDeg: Double,
+        vehicle: VehicleConfig,
+        rollZeroOffset: Double = 0.0
+    ): Vec2 {
+        return compensateTabletPosition(
+            tabletPos = tabletLocal,
+            headingDeg = headingDeg,
+            rollDeg = rollDeg - rollZeroOffset,
+            tabletHeight = vehicle.tabletHeightAboveAxle,
+            tabletForwardOffset = vehicle.tabletForwardOffset,
+            tabletRightOffset = vehicle.tabletRightOffset
+        )
+    }
+
+    fun calculateCentrifugalCompensatedRoll(
+        rawRollDeg: Double,
+        speedKmh: Double,
+        steerAngleDeg: Double,
+        wheelbase: Double
+    ): Double {
+        val speedMps = speedKmh / 3.6
+        val steerRad = Math.toRadians(steerAngleDeg)
+        val yawRate = if (wheelbase > 0.1) (speedMps * tan(steerRad)) / wheelbase else 0.0
+        val lateralAccel = speedMps * yawRate
+        val dynamicRollCompDeg = Math.toDegrees(atan2(lateralAccel, 9.81)) * 0.15
+        return rawRollDeg - dynamicRollCompDeg
+    }
+
+    fun calculateCentrifugalCompensatedRoll(
+        rawAccelRollDeg: Double,
+        speedKmh: Double,
+        yawRateRadPerSec: Double
+    ): Double {
+        val speedMps = speedKmh / 3.6
+        val lateralAccel = speedMps * yawRateRadPerSec
+        val dynamicRollCompDeg = Math.toDegrees(atan2(lateralAccel, 9.81)) * 0.15
+        return rawAccelRollDeg - dynamicRollCompDeg
+    }
+
+    fun calculateSwathTracking(
+        pivotPosition: Vec2,
+        tractorHeadingDeg: Double,
+        abLine: ABLine,
+        swathWidth: Double,
+        forcedSwathIndex: Int? = null
+    ): NavigationOutput {
+        val dir = abLine.dirVector
+        val normal = abLine.normalVector
+        val toPivot = pivotPosition - abLine.aLocal
+        val distAlong = toPivot.dot(dir)
+        val distAcross = toPivot.dot(normal)
+
+        val activeIndex = forcedSwathIndex ?: round(distAcross / swathWidth).toInt()
+        val swathCenterAcross = activeIndex * swathWidth
+        val crossTrack = distAcross - swathCenterAcross
+
+        var headingError = normalizeAngleDeg(tractorHeadingDeg - abLine.headingDeg)
+        val isReverse = abs(headingError) > 90.0
+        val swathDir = if (isReverse) -dir else dir
+        val effectiveCrossTrack = if (isReverse) -crossTrack else crossTrack
+        if (isReverse) {
+            headingError = normalizeAngleDeg(headingError - 180.0)
+        }
+
+        val swathOrigin = abLine.aLocal + (normal * swathCenterAcross)
+        val projectedPoint = swathOrigin + (dir * distAlong)
+
+        return NavigationOutput(
+            targetSteerAngleDeg = 0.0,
+            crossTrackErrorMeters = effectiveCrossTrack,
+            crossTrackErrorInches = effectiveCrossTrack * 39.3701,
+            headingErrorDeg = headingError,
+            activeSwathIndex = activeIndex,
+            swathOrigin = swathOrigin,
+            swathDirection = swathDir,
+            projectedPoint = projectedPoint,
+            isReversePass = isReverse,
+            algorithmUsed = SteeringAlgorithm.STANLEY
+        )
+    }
+
+    fun calculateStanleySteering(
+        crossTrackMeters: Double,
+        headingErrorDeg: Double,
+        speedKmh: Double,
+        stanleyGain: Double,
+        integralGain: Double,
+        deadbandCm: Double = 2.0,
+        maxSteerDeg: Double = 40.0
+    ): Double {
+        val speedMps = max(0.5, speedKmh / 3.6)
+        val effectiveCrossTrack = if (abs(crossTrackMeters * 100.0) < deadbandCm) 0.0 else crossTrackMeters
+        val crossTrackSteerRad = atan2(-stanleyGain * effectiveCrossTrack, speedMps)
+        val headingSteerRad = Math.toRadians(-headingErrorDeg)
+        val totalSteerDeg = Math.toDegrees(headingSteerRad + crossTrackSteerRad)
+        return totalSteerDeg.coerceIn(-maxSteerDeg, maxSteerDeg)
+    }
+
+    fun calculateStanleySteering(
+        crossTrackErrorMeters: Double,
+        headingErrorDeg: Double,
+        speedKmh: Double,
+        settings: GuidanceSettings,
+        vehicle: VehicleConfig
+    ): Double {
+        val aggressionScale = (settings.steeringAggressionPercent / 100.0).coerceIn(0.4, 2.5)
+        return calculateStanleySteering(
+            crossTrackMeters = crossTrackErrorMeters,
+            headingErrorDeg = headingErrorDeg,
+            speedKmh = speedKmh,
+            stanleyGain = settings.stanleyGain * aggressionScale,
+            integralGain = settings.stanleyIntegralGain * aggressionScale,
+            deadbandCm = (settings.deadbandCm / aggressionScale).coerceAtLeast(0.5),
+            maxSteerDeg = vehicle.maxSteerAngleDeg
+        )
+    }
+
+    fun calculateCurveTracking(
+        pivotPosition: Vec2,
+        headingDeg: Double,
+        curvePoints: List<Vec2>,
+        swathWidth: Double,
+        activeSwathIndex: Int = 0
+    ): NavigationOutput {
+        if (curvePoints.size < 2) {
+            return NavigationOutput(
+                targetSteerAngleDeg = 0.0,
+                crossTrackErrorMeters = 0.0,
+                crossTrackErrorInches = 0.0,
+                headingErrorDeg = 0.0,
+                activeSwathIndex = 0,
+                swathOrigin = pivotPosition,
+                swathDirection = Vec2(0.0, 1.0),
+                projectedPoint = pivotPosition,
+                isReversePass = false,
+                algorithmUsed = SteeringAlgorithm.STANLEY
+            )
+        }
+
+        var closestDistSq = Double.MAX_VALUE
+        var closestIdx = 0
+        for (i in curvePoints.indices) {
+            val dSq = (curvePoints[i] - pivotPosition).lengthSquared()
+            if (dSq < closestDistSq) {
+                closestDistSq = dSq
+                closestIdx = i
+            }
+        }
+
+        val nextIdx = min(curvePoints.size - 1, closestIdx + 1)
+        val p1 = curvePoints[closestIdx]
+        val p2 = curvePoints[nextIdx]
+        val segDir = (p2 - p1).normalized()
+        val segNormal = segDir.perpClockwise()
+        val toPivot = pivotPosition - p1
+        val crossTrack = toPivot.dot(segNormal) - (activeSwathIndex * swathWidth)
+        val segHeading = (Math.toDegrees(atan2(segDir.x, segDir.y)) + 360.0) % 360.0
+        val headingError = normalizeAngleDeg(headingDeg - segHeading)
+
+        return NavigationOutput(
+            targetSteerAngleDeg = 0.0,
+            crossTrackErrorMeters = crossTrack,
+            crossTrackErrorInches = crossTrack * 39.3701,
+            headingErrorDeg = headingError,
+            activeSwathIndex = activeSwathIndex,
+            swathOrigin = p1,
+            swathDirection = segDir,
+            projectedPoint = p1 + (segDir * toPivot.dot(segDir)),
+            isReversePass = false,
+            algorithmUsed = SteeringAlgorithm.STANLEY
+        )
+    }
+
+    fun calculateCurveTracking(
+        pivotPosition: Vec2,
+        tractorHeadingDeg: Double,
+        curveLine: CurveLine,
+        swathWidth: Double,
+        activeSwathIndex: Int = 0
+    ): NavigationOutput {
+        return calculateCurveTracking(
+            pivotPosition = pivotPosition,
+            headingDeg = tractorHeadingDeg,
+            curvePoints = curveLine.points,
+            swathWidth = swathWidth,
+            activeSwathIndex = activeSwathIndex
+        )
+    }
+
+    fun calculatePathTracking(
+        pivotPosition: Vec2,
+        headingDeg: Double,
+        pathPoints: List<Vec2>,
+        lookaheadGain: Double = 1.0,
+        speedKmh: Double = 0.0
+    ): NavigationOutput {
+        return calculateCurveTracking(pivotPosition, headingDeg, pathPoints, 0.0, 0)
+    }
+
+    fun calculatePurePursuitWaypointsSteering(
+        pivotPosition: Vec2,
+        headingDeg: Double,
+        waypoints: List<Vec2>,
+        lookaheadDistance: Double,
+        wheelbase: Double,
+        maxSteerDeg: Double = 40.0
+    ): Double {
+        if (waypoints.isEmpty()) return 0.0
+        val headingRad = Math.toRadians(headingDeg)
+        val fwd = Vec2(sin(headingRad), cos(headingRad))
+        val right = Vec2(cos(headingRad), -sin(headingRad))
+
+        var targetPt = waypoints.last()
+        for (pt in waypoints) {
+            if ((pt - pivotPosition).length() >= lookaheadDistance) {
+                targetPt = pt
+                break
+            }
+        }
+
+        val rel = targetPt - pivotPosition
+        val localX = rel.dot(right)
+        val localY = rel.dot(fwd)
+        val distSq = rel.lengthSquared()
+
+        if (distSq < 0.1 || localY <= 0.0) return 0.0
+        val curvature = (2.0 * localX) / distSq
+        val steerRad = atan(curvature * wheelbase)
+        return Math.toDegrees(steerRad).coerceIn(-maxSteerDeg, maxSteerDeg)
+    }
+
+    fun calculateSpeedAdaptiveLookahead(
+        speedKmh: Double,
+        baseLookaheadSec: Double,
+        minLookaheadMeters: Double,
+        maxLookaheadMeters: Double
+    ): Double {
+        val speedMps = speedKmh / 3.6
+        return (speedMps * baseLookaheadSec).coerceIn(minLookaheadMeters, maxLookaheadMeters)
+    }
+
+    fun calculateHeadlandTurnGuidance(
+        pivotPosition: Vec2,
+        headingDeg: Double,
+        headlandBoundary: List<Vec2>,
+        abLine: ABLine?,
+        isAutoUTurnEnabled: Boolean
+    ): HeadlandTurnInfo {
+        if (headlandBoundary.size < 3) return HeadlandTurnInfo()
+        val distToEdge = distanceToBoundaryEdge(pivotPosition, headlandBoundary)
+        val isInside = distToEdge < 0.0
+        val distToTurn = max(0.0, distToEdge)
+        val triggerUTurn = isAutoUTurnEnabled && distToEdge <= 3.0
+
+        return HeadlandTurnInfo(
+            distanceToTurnMeters = distToTurn,
+            isApproachingHeadland = distToEdge <= 15.0
+        )
+    }
+
+    fun calculateHeadlandTurnGuidance(
+        pivotPosition: Vec2,
+        tractorHeadingDeg: Double,
+        headlandBoundary: List<Vec2>,
+        abLine: ABLine?,
+        isAutoUTurnEnabled: Boolean,
+        activeSwathIndex: Int = 0,
+        swathDir: Vec2 = Vec2(0.0, 1.0)
+    ): HeadlandTurnInfo {
+        return calculateHeadlandTurnGuidance(
+            pivotPosition = pivotPosition,
+            headingDeg = tractorHeadingDeg,
+            headlandBoundary = headlandBoundary,
+            abLine = abLine,
+            isAutoUTurnEnabled = isAutoUTurnEnabled
+        )
+    }
+
+    fun generateUTurnPath(
+        startPivot: Vec2,
+        headingDeg: Double,
+        turnToRight: Boolean,
+        turnRadiusMeters: Double,
+        swathWidthMeters: Double
+    ): List<Vec2> {
+        val headingRad = Math.toRadians(headingDeg)
+        val fwd = Vec2(sin(headingRad), cos(headingRad))
+        val right = Vec2(cos(headingRad), -sin(headingRad))
+        val turnSign = if (turnToRight) 1.0 else -1.0
+
+        val path = mutableListOf<Vec2>()
+        path.add(startPivot)
+        val arcCenter = startPivot + (right * (turnRadiusMeters * turnSign))
+        val numSteps = 16
+        for (i in 1..numSteps) {
+            val angleStep = (PI * i) / numSteps
+            val currentAngle = headingRad - (turnSign * PI / 2.0) + (turnSign * angleStep)
+            val pt = arcCenter + Vec2(cos(currentAngle) * turnRadiusMeters * turnSign, sin(currentAngle) * turnRadiusMeters)
+            path.add(pt)
+        }
+        return path
+    }
+
+    fun generateUTurnPath(
+        currentSwathEnd: Vec2,
+        currentHeadingDeg: Double,
+        nextSwathStart: Vec2,
+        turnRadiusMeters: Double = 6.0,
+        turnToRight: Boolean = true
+    ): List<Vec2> {
+        return generateUTurnPath(
+            startPivot = currentSwathEnd,
+            headingDeg = currentHeadingDeg,
+            turnToRight = turnToRight,
+            turnRadiusMeters = turnRadiusMeters,
+            swathWidthMeters = 6.0
+        )
+    }
+
+    fun checkObstacleProximity(
+        pivotPosition: Vec2,
+        obstacles: List<FieldObstacle>,
+        warningThresholdMeters: Double = 12.0
+    ): FieldObstacle? {
+        return obstacles.firstOrNull { obs ->
+            (obs.localPos - pivotPosition).length() <= (obs.radiusMeters + warningThresholdMeters)
+        }
+    }
+
+    fun distanceToBoundaryEdge(point: Vec2, boundary: List<Vec2>): Double {
+        if (boundary.size < 3) return Double.MAX_VALUE
+        var minDist = Double.MAX_VALUE
+        for (i in boundary.indices) {
+            val p1 = boundary[i]
+            val p2 = boundary[(i + 1) % boundary.size]
+            val seg = p2 - p1
+            val lenSq = seg.lengthSquared()
+            val t = if (lenSq > 0.0001) ((point - p1).dot(seg) / lenSq).coerceIn(0.0, 1.0) else 0.0
+            val proj = p1 + (seg * t)
+            val dist = (point - proj).length()
+            if (dist < minDist) minDist = dist
+        }
+        return minDist
+    }
+
+    fun calculatePolygonAreaM2(points: List<Vec2>): Double {
+        if (points.size < 3) return 0.0
+        var area = 0.0
+        for (i in points.indices) {
+            val j = (i + 1) % points.size
+            area += points[i].x * points[j].y
+            area -= points[j].x * points[i].y
+        }
+        return abs(area) / 2.0
+    }
+
+    fun generateHeadlandPolygon(boundary: List<Vec2>, offsetMeters: Double): List<Vec2> {
+        if (boundary.size < 3) return emptyList()
+        val cx = boundary.sumOf { it.x } / boundary.size
+        val cy = boundary.sumOf { it.y } / boundary.size
+        val center = Vec2(cx, cy)
+        return boundary.map { pt ->
+            val dir = center - pt
+            val len = dir.length()
+            if (len > offsetMeters) pt + (dir.normalized() * offsetMeters) else pt
+        }
+    }
+
+    fun calculateImplementSections(
+        pivotPosition: Vec2,
+        tractorHeadingDeg: Double,
+        vehicle: VehicleConfig,
+        implement: ImplementConfig,
+        fieldBoundary: List<Vec2>?,
+        appliedPolygons: List<AppliedSwathSegment>,
+        sectionOverrides: List<SectionOverride>,
+        spatialGrid: CoverageSpatialGrid
+    ): ImplementStatus {
+        val headingRad = Math.toRadians(tractorHeadingDeg)
+        val fwd = Vec2(sin(headingRad), cos(headingRad))
+        val right = Vec2(cos(headingRad), -sin(headingRad))
+        val toolbarDist = vehicle.hitchLength - implement.offsetBehindTractor
+        val toolbarCenter = pivotPosition + (fwd * toolbarDist)
+
+        val numSections = implement.numSections.coerceIn(1, 48)
+        val sectionWidth = implement.toolWidth / numSections
+        val halfTotal = implement.toolWidth * 0.5
+
+        val sections = mutableListOf<SectionSpan>()
+        val states = mutableListOf<Boolean>()
+
+        for (i in 0 until numSections) {
+            val leftOffset = -halfTotal + (i * sectionWidth)
+            val rightOffset = leftOffset + sectionWidth
+            val leftPt = toolbarCenter + (right * leftOffset)
+            val rightPt = toolbarCenter + (right * rightOffset)
+            sections.add(SectionSpan(leftPt, rightPt))
+
+            val override = sectionOverrides.getOrElse(i) { SectionOverride.AUTO }
+            val state = when (override) {
+                SectionOverride.FORCED_ON -> true
+                SectionOverride.FORCED_OFF -> false
+                SectionOverride.AUTO -> implement.isMasterActive
+            }
+            states.add(state)
+        }
+
+        return ImplementStatus(
+            isMasterActive = implement.isMasterActive,
+            sectionStates = states,
+            sections = sections
+        )
+    }
+}

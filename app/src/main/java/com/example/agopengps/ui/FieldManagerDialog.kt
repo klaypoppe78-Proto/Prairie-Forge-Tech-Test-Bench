@@ -94,7 +94,7 @@ fun FieldManagerDialog(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "AgSteer Field & Pattern Storage",
+                                text = "Sentinel Guidance Field & Pattern Storage",
                                 color = Color.White,
                                 fontWeight = FontWeight.Black,
                                 fontSize = 18.sp
@@ -689,7 +689,7 @@ fun FieldManagerDialog(
                                             }
                                             Spacer(modifier = Modifier.height(6.dp))
                                             Text(
-                                                "Import field boundary polygons from Google Earth (.kml), QGIS / GeoJSON (.geojson), Climate FieldView, or John Deere Operations Center. AgOpenGPS will automatically project coordinates, generate a 12m headland boundary, and calculate an optimal baseline AB line.",
+                                                "Import field boundary polygons from Google Earth (.kml), QGIS / GeoJSON (.geojson), Climate FieldView, or John Deere Operations Center. Sentinel Guidance will automatically project coordinates, generate a 12m headland boundary, and calculate an optimal baseline AB line.",
                                                 color = Color(0xFFB0BEC5),
                                                 fontSize = 12.sp
                                             )

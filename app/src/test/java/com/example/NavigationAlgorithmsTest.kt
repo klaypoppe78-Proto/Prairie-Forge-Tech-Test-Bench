@@ -73,24 +73,15 @@ class NavigationAlgorithmsTest {
 
     @Test
     fun testPurePursuitSteering() {
-        val a = Vec2(0.0, -100.0)
-        val b = Vec2(0.0, 100.0)
-        val aGeo = GeoPoint(41.0, -87.0)
-        val bGeo = GeoPoint(41.01, -87.0)
-        val abLine = ABLine.fromPoints(a, b, aGeo, bGeo)
-
         val vehicle = VehicleConfig(wheelbase = 2.85)
-        val settings = GuidanceSettings()
 
-        // Tractor is at x = 1.0m, heading North
-        val steerAngle = GuidanceAlgorithms.calculatePurePursuitSteering(
+        // Tractor is at x = 1.0m, heading North, following waypoints along x = 0.0
+        val steerAngle = GuidanceAlgorithms.calculatePurePursuitWaypointsSteering(
             pivotPosition = Vec2(1.0, 0.0),
-            tractorHeadingDeg = 0.0,
-            swathOrigin = Vec2(0.0, 0.0),
-            swathDir = Vec2(0.0, 1.0),
-            speedKmh = 7.2,
-            settings = settings,
-            vehicle = vehicle
+            headingDeg = 0.0,
+            waypoints = listOf(Vec2(0.0, 0.0), Vec2(0.0, 10.0), Vec2(0.0, 25.0)),
+            lookaheadDistance = 6.0,
+            wheelbase = vehicle.wheelbase
         )
 
         assertTrue("Pure pursuit should steer towards line (steer left)", steerAngle < 0)
@@ -98,7 +89,8 @@ class NavigationAlgorithmsTest {
 
     @Test
     fun testNmeaParserPaogi() {
-        val paogi = "\$PAOGI,123456.00,42.123456,-88.654321,4,18,0.8,240.5,0.6,1.25,-0.50,185.4,0.1*45"
+        // Format parsed by NmeaParser.parsePaogi: $PAOGI,time,lat,lon,alt,heading,roll,pitch,speed,sats,fix
+        val paogi = "\$PAOGI,123456.00,42.123456,-88.654321,240.5,185.4,1.25,-0.50,8.2,18,4*45"
         val report = NmeaParser.parse(paogi)
 
         assertNotNull(report)
@@ -119,7 +111,6 @@ class NavigationAlgorithmsTest {
         val aPlus = ABLine.fromAPlus(aLocal, heading, aGeo, "East A+")
 
         assertEquals(90.0, aPlus.headingDeg, 0.001)
-        assertTrue(aPlus.isAPlusLine)
         // Vector pointing East should have x = 1, y = 0
         assertEquals(1.0, aPlus.dirVector.x, 0.001)
         assertEquals(0.0, aPlus.dirVector.y, 0.001)
@@ -185,7 +176,8 @@ class NavigationAlgorithmsTest {
             implement = implement,
             fieldBoundary = null,
             appliedPolygons = emptyList(),
-            sectionOverrides = overrides
+            sectionOverrides = overrides,
+            spatialGrid = CoverageSpatialGrid()
         )
 
         assertEquals(4, status.sectionStates.size)

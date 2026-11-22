@@ -75,6 +75,9 @@ fun SettingsDialog(
     var lookaheadGain by remember { mutableStateOf(guidanceSettings.purePursuitLookaheadGain) }
     var tabletGpsLookahead by remember { mutableStateOf(guidanceSettings.tabletGpsLookaheadSec) }
     var terrainSideDraftGain by remember { mutableStateOf(guidanceSettings.terrainSideDraftGain) }
+    var steeringAggression by remember { mutableFloatStateOf(guidanceSettings.steeringAggressionPercent.toFloat()) }
+    var operatorOverrideSensitivity by remember { mutableFloatStateOf(guidanceSettings.operatorOverrideSensitivityDeg.toFloat()) }
+    var isOperatorOverrideActive by remember { mutableStateOf(guidanceSettings.isOperatorOverrideEnabled) }
     var isTerrainCompActive by remember { mutableStateOf(isTerrainCompensationEnabled) }
     var isTopoMapActive by remember { mutableStateOf(showTopographyMap) }
     var is3DTerrainActive by remember { mutableStateOf(show3DTerrainMesh) }
@@ -131,7 +134,7 @@ fun SettingsDialog(
                 ) {
                     Column {
                         Text(
-                            text = "AgSteer Hardware & Vehicle Setup",
+                            text = "Sentinel Guidance Hardware & Vehicle Setup",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Black
                         )
@@ -295,20 +298,6 @@ fun SettingsDialog(
                                         onValueChange = { offsetBehindTractorFeet = it.toDouble() },
                                         valueRange = 0f..25f
                                     )
-                                }
-
-                                // Number of Sections
-                                Column {
-                                    Text("Boom Section Count: $numSections Sections", fontWeight = FontWeight.Bold)
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        listOf(1, 2, 4, 6, 8, 12, 16).forEach { count ->
-                                            FilterChip(
-                                                selected = numSections == count,
-                                                onClick = { numSections = count },
-                                                label = { Text("$count") }
-                                            )
-                                        }
-                                    }
                                 }
 
                                 HorizontalDivider()
@@ -821,7 +810,7 @@ fun SettingsDialog(
                         // ==========================================
                         3 -> {
                             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                Text("AgSteer All-In-One (AIO) Hardware Interface", fontWeight = FontWeight.Bold)
+                                Text("Sentinel Guidance All-In-One (AIO) Hardware Interface", fontWeight = FontWeight.Bold)
 
                                 // USB OTG Hardware Status Card
                                 Card(
@@ -1158,6 +1147,53 @@ fun SettingsDialog(
                                     )
                                 }
 
+                                // Steering Aggression Slider
+                                Surface(
+                                    color = Color(0xFF1B2A38),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                            Text("STEERING AGGRESSION / SENSITIVITY", color = Color(0xFF00E5FF), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            Text("${steeringAggression.toInt()}%", color = Color(0xFF00E5FF), fontWeight = FontWeight.Black, fontSize = 12.sp)
+                                        }
+                                        Slider(
+                                            value = steeringAggression,
+                                            onValueChange = { steeringAggression = it },
+                                            valueRange = 50f..220f,
+                                            steps = 16
+                                        )
+                                        Text("Scales steering response speed and line capture aggressiveness.", fontSize = 10.sp, color = Color.White.copy(alpha = 0.7f))
+                                    }
+                                }
+
+                                // Operator Override Disengage
+                                Surface(
+                                    color = Color(0xFF2C2416),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                            Text("OPERATOR WHEEL OVERRIDE SAFETY", color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            Switch(
+                                                checked = isOperatorOverrideActive,
+                                                onCheckedChange = { isOperatorOverrideActive = it }
+                                            )
+                                        }
+                                        if (isOperatorOverrideActive) {
+                                            Text("Disengage Threshold: ${String.format("%.1f", operatorOverrideSensitivity)}° wheel movement", fontSize = 11.sp, color = Color.White)
+                                            Slider(
+                                                value = operatorOverrideSensitivity,
+                                                onValueChange = { operatorOverrideSensitivity = it },
+                                                valueRange = 1.0f..6.0f,
+                                                steps = 9
+                                            )
+                                        }
+                                    }
+                                }
+
                                 Text("Cross-Track Deadband: ${String.format("%.1f", deadbandInches)} in (${String.format("%.1f", deadbandInches * 2.54)} cm)")
                                 Slider(
                                     value = deadbandInches.toFloat(),
@@ -1466,7 +1502,7 @@ fun SettingsDialog(
                                         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                                 Text("Step 2: Plug Tablet USB OTG into Teensy 4.1 AIO Board", fontWeight = FontWeight.Bold)
-                                                Text("Plug a USB-C OTG cable from this Android tablet into the Teensy 4.1 USB port on your AgOpenGPS All-In-One board. Then press 'Scan & Connect USB'.", fontSize = 12.sp)
+                                                Text("Plug a USB-C OTG cable from this Android tablet into the Teensy 4.1 USB port on your Sentinel Guidance All-In-One board. Then press 'Scan & Connect USB'.", fontSize = 12.sp)
 
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
@@ -1624,7 +1660,10 @@ fun SettingsDialog(
                                     deadbandCm = deadbandInches * 2.54,
                                     purePursuitLookaheadGain = lookaheadGain,
                                     tabletGpsLookaheadSec = tabletGpsLookahead,
-                                    terrainSideDraftGain = terrainSideDraftGain
+                                    terrainSideDraftGain = terrainSideDraftGain,
+                                    steeringAggressionPercent = steeringAggression.toInt(),
+                                    operatorOverrideSensitivityDeg = operatorOverrideSensitivity.toDouble(),
+                                    isOperatorOverrideEnabled = isOperatorOverrideActive
                                 )
                             )
                             if (isTerrainCompActive != isTerrainCompensationEnabled) {

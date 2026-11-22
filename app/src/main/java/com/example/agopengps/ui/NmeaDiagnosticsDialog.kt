@@ -145,7 +145,7 @@ fun NmeaDiagnosticsDialog(
                             onClick = {
                                 val report = diagnosticsManager.generateFullDiagnosticsReport(vehicleState)
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val clip = ClipData.newPlainText("AgSteer NMEA Diagnostics", report)
+                                val clip = ClipData.newPlainText("Sentinel Guidance NMEA Diagnostics", report)
                                 clipboard.setPrimaryClip(clip)
                                 Toast.makeText(context, "Full NMEA Diagnostic Report Copied!", Toast.LENGTH_SHORT).show()
                             },
@@ -970,7 +970,7 @@ private fun CommandSenderTab(
         Pair("Query Tracking Status", "TRACKSTATUS\r\n"),
         Pair("Query Satellites in View", "SATELLITES\r\n"),
         Pair("Factory Reset Receiver", "FRESET\r\n"),
-        Pair("AgOpenGPS Steer Ping (PGN 254)", "PAOGI,000000.00,0.0,0.0,4,20,0.8,300.0,0.8,0.0,0.0,0.0,0.0\r\n")
+        Pair("Sentinel Guidance Steer Ping (PGN 254)", "PAOGI,000000.00,0.0,0.0,4,20,0.8,300.0,0.8,0.0,0.0,0.0,0.0\r\n")
     )
 
     LazyColumn(

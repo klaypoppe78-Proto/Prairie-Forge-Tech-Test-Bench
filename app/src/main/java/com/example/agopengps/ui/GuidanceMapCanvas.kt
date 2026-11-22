@@ -1,78 +1,81 @@
 package com.example.agopengps.ui
 
+import android.graphics.Typeface
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.LayersClear
-import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.icons.filled.Terrain
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.drawscope.*
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.agopengps.CameraViewMode
 import com.example.agopengps.GuidanceMode
-import com.example.agopengps.map.*
+import com.example.agopengps.LiveTelemetryState
+import com.example.agopengps.io.ThreePointState
+import com.example.agopengps.map.MapTileProvider
+import com.example.agopengps.map.SatelliteTileRepository
+import com.example.agopengps.map.TerrainAttitude
+import com.example.agopengps.map.TerrainSquare
 import com.example.agopengps.navigation.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
 import kotlin.math.*
 
 @Composable
 fun GuidanceMapCanvas(
-    vehicleState: VehicleState,
+    vehicleState: VehicleState = VehicleState(),
     vehicleConfig: VehicleConfig,
     implementConfig: ImplementConfig,
     currentABLine: ABLine?,
     currentCurveLine: CurveLine?,
-    guidanceMode: GuidanceMode,
-    cameraViewMode: CameraViewMode,
-    fieldBoundary: List<Vec2>,
-    headlandBoundary: List<Vec2>,
-    uTurnPath: List<Vec2>,
-    recordingCurvePoints: List<Vec2>,
-    isRecordingBoundary: Boolean,
-    appliedSegments: List<AppliedSwathSegment>,
-    isNightMode: Boolean,
+    guidanceMode: GuidanceMode = GuidanceMode.AB_LINE,
+    cameraViewMode: CameraViewMode = CameraViewMode.CAB_3D,
+    fieldBoundary: List<Vec2> = emptyList(),
+    headlandBoundary: List<Vec2> = emptyList(),
+    uTurnPath: List<Vec2> = emptyList(),
+    recordingCurvePoints: List<Vec2> = emptyList(),
+    isRecordingBoundary: Boolean = false,
+    activeRecallPath: RecordedPath? = null,
+    recordingPathPoints: List<PathPoint> = emptyList(),
+    isRecordingPath: Boolean = false,
+    appliedSegments: List<AppliedSwathSegment> = emptyList(),
+    coverageChunkStore: CoverageChunkStore? = null,
+    threePointState: ThreePointState = ThreePointState.LOWERED,
+    isNightMode: Boolean = true,
     themeMode: DisplayThemeMode = DisplayThemeMode.STANDARD_AG,
     obstacles: List<FieldObstacle> = emptyList(),
     headlandTurnInfo: HeadlandTurnInfo = HeadlandTurnInfo(),
     activeObstacleAlert: FieldObstacle? = null,
     showSatelliteOverlay: Boolean = false,
-    satelliteMapProvider: MapTileProvider = MapTileProvider.GOOGLE_SATELLITE,
+    satelliteMapProvider: MapTileProvider = MapTileProvider.ESRI_WORLD_TOPO,
     rtkBaseConfig: RtkBaseStationConfig = RtkBaseStationConfig(),
     slidingHitchConfig: SlidingHitchConfig = SlidingHitchConfig(),
     slidingHitchState: SlidingHitchState = SlidingHitchState(),
-    zoomFactor: Float,
+    zoomFactor: Float = 1.0f,
     onZoomChange: (Float) -> Unit = {},
     terrainSquare: TerrainSquare? = null,
     terrainAttitude: TerrainAttitude = TerrainAttitude(),
-    isTerrainCompensationEnabled: Boolean = false,
-    showTopographyMap: Boolean = false,
-    show3DTerrainMesh: Boolean = false,
+    isTerrainCompensationEnabled: Boolean = true,
+    showTopographyMap: Boolean = true,
+    show3DTerrainMesh: Boolean = true,
     navigationOutput: NavigationOutput? = null,
-    onToggleCameraMode: () -> Unit,
+    tempPointA: Vec2? = null,
+    abTrackTrail: List<Vec2> = emptyList(),
+    isSettingAB: Boolean = false,
+    telemetryFlow: StateFlow<LiveTelemetryState>? = null,
+    onToggleCameraMode: () -> Unit = {},
     onCycleBasemap: () -> Unit = {},
     onOpenRtkBaseDialog: () -> Unit = {},
     onDropHazardPin: () -> Unit = {},
@@ -83,98 +86,106 @@ fun GuidanceMapCanvas(
     onResetToBasicGps: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // Refined Modern Theme palette: Sleek Obsidian Cab, Modern Slate Day, or Sunlight High-Contrast
+    val isDaylight = themeMode == DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST
+    val isOledNight = themeMode == DisplayThemeMode.CAB_OLED_NIGHT
+
+    // High-Sun Daylight matte glare-resistant palette + Emerald default + OLED Night
     val fieldBgColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFF8FAFC)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFF030712)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0xFF090E17) else Color(0xFFF1F5F9)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFE9EFE9) // Matte glare-resistant field canvas
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFF000000)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFF090E17)
     }
     val gridLineColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFCBD5E1)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x2294A3B8)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0x2894A3B8) else Color(0x3394A3B8)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFF94A3B8)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x1CE53935)
+        DisplayThemeMode.STANDARD_AG -> Color(0x2E94A3B8)
     }
     val boundaryColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFE11D48)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFBBF24)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0xFFFBBF24) else Color(0xFFE11D48)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFBE123C)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFFB300)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFFFBBF24)
     }
     val headlandColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFF97316)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFF97316)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0xFFFB923C) else Color(0xFFEA580C)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFC2410C)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFF5722)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFFFB923C)
     }
     val activeSwathColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFF059669)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFF00F59B)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0xFF00F59B) else Color(0xFF059669)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFD90429) // High-contrast crimson over matte light field & green swaths
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFF9100)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFF00FF9D)
+    }
+    val activeSwathHaloColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xF0FFFFFF)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x55FF6D00)
+        DisplayThemeMode.STANDARD_AG -> Color(0xB8020617)
     }
     val parallelSwathColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFF0284C7)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x4438BDF8)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0x5538BDF8) else Color(0x770284C7)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFF0369A1)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x55FFB300)
+        DisplayThemeMode.STANDARD_AG -> Color(0x7038BDF8)
     }
     val baseCoverageColor = when (themeMode) {
-        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0x9910B981)
-        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x77059669)
-        DisplayThemeMode.STANDARD_AG -> if (isNightMode) Color(0x8810B981) else Color(0x99059669)
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xCC10B981)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xCCFF6D00)
+        DisplayThemeMode.STANDARD_AG -> Color(0xC800E676)
     }
-    val overlapHighlightColor = Color(0x99F59E0B) // Luminous warm amber overlap highlight
+    val coverageBorderColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFF047857)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFF9100)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFF00B248)
+    }
+    val indexContourColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xDD9A3412) // Rich terracotta on matte light field
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xBBFFB300)
+        DisplayThemeMode.STANDARD_AG -> Color(0xDDFCD34D)
+    }
+    val minorContourColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0x99854D0E)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x66FF9100)
+        DisplayThemeMode.STANDARD_AG -> Color(0x8086EFAC)
+    }
+    val uTurnArcColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xFFEA580C)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0xFFFFB300)
+        DisplayThemeMode.STANDARD_AG -> Color(0xFFFFB703)
+    }
+    val uTurnHaloColor = when (themeMode) {
+        DisplayThemeMode.SUNLIGHT_HIGH_CONTRAST -> Color(0xE6FFFFFF)
+        DisplayThemeMode.CAB_OLED_NIGHT -> Color(0x66000000)
+        DisplayThemeMode.STANDARD_AG -> Color(0xC8090E17)
+    }
 
     var panOffset by remember { mutableStateOf(Offset.Zero) }
-    val tileRepo = remember { SatelliteTileRepository() }
-    var tileRefreshTrigger by remember { mutableStateOf(0) }
-
-    // Reusable Path instances to prevent frame-rate jitter and GC allocation spikes at 60-120fps
-    val reusableSegPath = remember { Path() }
-    val reusableBoundaryPath = remember { Path() }
-    val reusableHeadlandPath = remember { Path() }
-    val reusableTowerPath = remember { Path() }
-    val reusableArrowPath = remember { Path() }
-
-    // Proactively fetch tiles around current position when basemap overlay is on
-    // Key ONLY on discrete center tile index to avoid continuous network thrashing
-    val discreteCenterTile = remember(
-        showSatelliteOverlay,
-        satelliteMapProvider,
-        vehicleState.geoPosition.latitude,
-        vehicleState.geoPosition.longitude,
-        (zoomFactor * 2f).toInt()
-    ) {
-        if (!showSatelliteOverlay || vehicleState.geoPosition.latitude == 0.0) {
-            null
-        } else {
-            val pixelsPerMeter = 4.8f * zoomFactor
-            val z = tileRepo.getZoomForPixelsPerMeter(pixelsPerMeter, vehicleState.geoPosition.latitude, satelliteMapProvider)
-            tileRepo.geoToTile(vehicleState.geoPosition.latitude, vehicleState.geoPosition.longitude, z)
-        }
-    }
-
-    LaunchedEffect(showSatelliteOverlay, satelliteMapProvider, discreteCenterTile) {
-        tileRepo.currentProvider = satelliteMapProvider
-        if (showSatelliteOverlay && discreteCenterTile != null) {
-            val centerTile = discreteCenterTile
-            val z = centerTile.z
-            // Fetch 5x5 surrounding tiles asynchronously for seamless coverage ahead of travel
-            coroutineScope {
-                for (dx in -2..2) {
-                    for (dy in -2..2) {
-                        launch(Dispatchers.IO) {
-                            val tileCoord = TileCoord(z, centerTile.x + dx, centerTile.y + dy)
-                            if (tileRepo.getCachedTile(tileCoord, satelliteMapProvider) == null) {
-                                val bitmap = tileRepo.fetchTile(tileCoord, satelliteMapProvider)
-                                if (bitmap != null) {
-                                    tileRefreshTrigger++
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     val currentOnZoomChange by rememberUpdatedState(onZoomChange)
+
+    // Pre-allocated zero-allocation scratch buffers reused across every draw frame
+    val scratch = remember { CanvasScratchBuffers() }
+
+    // Collect live 20 Hz telemetry as State<T> and read ONLY inside Canvas draw lambda (zero composition recompositions!)
+    val telemetryState: State<LiveTelemetryState>? = telemetryFlow?.collectAsStateWithLifecycle()
+
+    // Only run pulse animation while actively setting A-B points to save GPU/CPU cycles during steady driving
+    val pulseScaleState: State<Float>
+    val pulseAlphaState: State<Float>
+    if (isSettingAB || tempPointA != null) {
+        val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+        pulseScaleState = infiniteTransition.animateFloat(
+            initialValue = 1.0f,
+            targetValue = 1.45f,
+            animationSpec = infiniteRepeatable(animation = tween(1100, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+            label = "pulse_scale"
+        )
+        pulseAlphaState = infiniteTransition.animateFloat(
+            initialValue = 0.8f,
+            targetValue = 0.0f,
+            animationSpec = infiniteRepeatable(animation = tween(1100, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+            label = "pulse_alpha"
+        )
+    } else {
+        pulseScaleState = remember { mutableFloatStateOf(1.1f) }
+        pulseAlphaState = remember { mutableFloatStateOf(0.45f) }
+    }
 
     LaunchedEffect(cameraViewMode) {
         if (cameraViewMode != CameraViewMode.FREE_PAN) {
@@ -182,11 +193,40 @@ fun GuidanceMapCanvas(
         }
     }
 
+    val tileRepo = remember { SatelliteTileRepository() }
+    var tileVersion by remember { mutableIntStateOf(0) }
+
+    // Lifecycle cleanup for background satellite/topo tile downloads
+    DisposableEffect(tileRepo) {
+        onDispose { tileRepo.shutdown() }
+    }
+
+    val currentPixelsPerMeter = (14.0f * zoomFactor).coerceIn(2.0f, 150.0f)
+
+    // Coarsely bucketed tile trigger (~220m buckets) using derivedStateOf so tile fetches don't trigger 20 Hz recomposition
+    val tileBucketKey by remember(telemetryState, vehicleState.geoPosition) {
+        derivedStateOf {
+            val geo = telemetryState?.value?.vehicleState?.geoPosition ?: vehicleState.geoPosition
+            ((geo.latitude * 500.0).roundToInt().toLong() shl 32) or ((geo.longitude * 500.0).roundToInt().toLong() and 0xFFFFFFFFL)
+        }
+    }
+    LaunchedEffect(showSatelliteOverlay, satelliteMapProvider, zoomFactor, tileBucketKey) {
+        if (showSatelliteOverlay) {
+            val centerGeo = telemetryState?.value?.vehicleState?.geoPosition ?: vehicleState.geoPosition
+            tileRepo.ensureTilesLoaded(
+                centerGeo = centerGeo,
+                pixelsPerMeter = currentPixelsPerMeter,
+                provider = satelliteMapProvider,
+                onTileLoaded = { tileVersion++ }
+            )
+        } else {
+            tileRepo.cancelPendingDownloads()
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(fieldBgColor)
-            .testTag("guidance_canvas")
             .pointerInput(cameraViewMode) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     if (zoom != 1.0f && abs(zoom - 1.0f) > 0.0005f) {
@@ -197,111 +237,203 @@ fun GuidanceMapCanvas(
                     }
                 }
             }
+            .testTag("guidance_canvas")
     ) {
-        val currentOriginGeo = remember(vehicleState.geoPosition) {
-            if (vehicleState.geoPosition.latitude != 0.0 || vehicleState.geoPosition.longitude != 0.0) {
-                // Anchor map origin directly to the active vehicle's real GNSS coordinate datum
-                GeoUtils.localMetersToGeo(Vec2(-vehicleState.localPivotPosition.x, -vehicleState.localPivotPosition.y), vehicleState.geoPosition)
-            } else {
-                GeoPoint(44.9141, -95.7153, 310.0)
-            }
-        }
-
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val _trigger = tileRefreshTrigger // Observe recomposition on new tile load
+            // Draw-phase reads ONLY (isolates 20 Hz pose updates from Compose composition!)
+            val _tileVersionTrigger = tileVersion
+            val live = telemetryState?.value
+            val liveVehicle = live?.vehicleState ?: vehicleState
+            val liveTerrainSquare = live?.currentTerrainSquare ?: terrainSquare
+            val liveUTurnPath = live?.uTurnPath ?: uTurnPath
+            val liveAbTrail = live?.abTrackTrail ?: abTrackTrail
+            val pulseScale = pulseScaleState.value
+            val pulseAlpha = pulseAlphaState.value
+
             val canvasWidth = size.width
             val canvasHeight = size.height
-
-            val tractorPivot = vehicleState.localPivotPosition
-            val headingDeg = vehicleState.headingDeg
+            val tractorPivot = liveVehicle.localPivotPosition
+            val headingDeg = liveVehicle.headingDeg
             val headingRad = Math.toRadians(headingDeg)
             val sinH = sin(headingRad)
             val cosH = cos(headingRad)
 
-            val pixelsPerMeter = 4.8f * zoomFactor
-            val is3D = cameraViewMode == CameraViewMode.CAB_3D
+            val pixelsPerMeter = (14.0f * zoomFactor).coerceIn(2.0f, 150.0f)
+            val is3D = (cameraViewMode == CameraViewMode.CAB_3D)
+            val textPaint = scratch.textPaint
+
+            // Shared Satellite & Topographic Tile Layer Renderer
+            fun drawSatelliteTileLayer(anchorScreen: Offset, tileAlpha: Float = 1.0f) {
+                val centerGeo = liveVehicle.geoPosition
+                val renderZoom = tileRepo.getRenderZoomLevel(pixelsPerMeter, satelliteMapProvider, centerGeo.latitude)
+                val visibleCoords = tileRepo.getVisibleTileCoords(centerGeo, renderZoom, radiusTiles = 3)
+
+                for (tileCoord in visibleCoords) {
+                    val cached = tileRepo.getCachedTileWithFallback(tileCoord, satelliteMapProvider) ?: continue
+                    val (bitmap, actualCoord) = cached
+                    val (tileNwLocal, tileSeLocal) = tileRepo.tileToLocalBoundsMeters(tileCoord, centerGeo)
+                    val nwX = anchorScreen.x + tileNwLocal.x.toFloat() * pixelsPerMeter
+                    val nwY = anchorScreen.y - tileNwLocal.y.toFloat() * pixelsPerMeter
+                    val seX = anchorScreen.x + tileSeLocal.x.toFloat() * pixelsPerMeter
+                    val seY = anchorScreen.y - tileSeLocal.y.toFloat() * pixelsPerMeter
+
+                    val leftPx = min(nwX, seX).roundToInt()
+                    val topPx = min(nwY, seY).roundToInt()
+                    val rightPx = max(nwX, seX).roundToInt()
+                    val bottomPx = max(nwY, seY).roundToInt()
+                    val dstWidth = (rightPx - leftPx).coerceAtLeast(1)
+                    val dstHeight = (bottomPx - topPx).coerceAtLeast(1)
+
+                    if (rightPx < -canvasWidth || leftPx > canvasWidth * 2 || bottomPx < -canvasHeight || topPx > canvasHeight * 2) {
+                        continue
+                    }
+
+                    val srcOffset: IntOffset
+                    val srcSize: IntSize
+                    if (actualCoord.z < tileCoord.z) {
+                        val dz = tileCoord.z - actualCoord.z
+                        val factor = 1 shl dz
+                        val ix = tileCoord.x and (factor - 1)
+                        val iy = tileCoord.y and (factor - 1)
+                        val x0 = ((ix.toDouble() / factor) * bitmap.width).roundToInt().coerceIn(0, (bitmap.width - 1).coerceAtLeast(0))
+                        val y0 = ((iy.toDouble() / factor) * bitmap.height).roundToInt().coerceIn(0, (bitmap.height - 1).coerceAtLeast(0))
+                        val x1 = (((ix + 1).toDouble() / factor) * bitmap.width).roundToInt().coerceIn(x0 + 1, bitmap.width.coerceAtLeast(1))
+                        val y1 = (((iy + 1).toDouble() / factor) * bitmap.height).roundToInt().coerceIn(y0 + 1, bitmap.height.coerceAtLeast(1))
+                        srcOffset = IntOffset(x0, y0)
+                        srcSize = IntSize((x1 - x0).coerceAtLeast(1), (y1 - y0).coerceAtLeast(1))
+                    } else {
+                        srcOffset = IntOffset.Zero
+                        srcSize = IntSize(bitmap.width, bitmap.height)
+                    }
+
+                    drawImage(
+                        image = bitmap,
+                        srcOffset = srcOffset,
+                        srcSize = srcSize,
+                        dstOffset = IntOffset(leftPx, topPx),
+                        dstSize = IntSize(dstWidth, dstHeight),
+                        alpha = tileAlpha,
+                        filterQuality = FilterQuality.Medium
+                    )
+                }
+            }
 
             if (is3D) {
-                // --- ELEVATED HIGH-ANGLE TOP-DOWN 3D PERSPECTIVE (AG-CAB CHASE VIEW) ---
-                // Higher top-down pitch (~60° look-down) stabilizes tractor model, swath lines, and avoids pinch distortion
-                val horizonY = canvasHeight * 0.04f
-                val tractorScreenPos = Offset(canvasWidth / 2f, canvasHeight * 0.76f)
+                // =========================================================================
+                // --- 3D IN-CAB PERSPECTIVE VIEW ---
+                // =========================================================================
+                val horizonY = canvasHeight * 0.08f
+                val tractorScreenPos = Offset(canvasWidth * 0.5f, canvasHeight * 0.62f)
                 val fwdVec = Vec2(sinH, cosH)
                 val rightVec = Vec2(cosH, -sinH)
 
-                // Sky & Atmospheric Horizon Rendering
-                val skyColors = if (isNightMode) {
-                    listOf(Color(0xFF030D14), Color(0xFF0C1F28), Color(0xFF16323B))
-                } else {
-                    listOf(Color(0xFF81D4FA), Color(0xFFB3E5FC), Color(0xFFE1F5FE))
+                val skyColors = when {
+                    isOledNight -> listOf(Color(0xFF000000), Color(0xFF080300), Color(0xFF140700))
+                    isDaylight -> listOf(Color(0xFF93C5FD), Color(0xFFBFDBFE), Color(0xFFDBEAFE))
+                    else -> listOf(Color(0xFF030D14), Color(0xFF0C1F28), Color(0xFF16323B))
                 }
                 drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = skyColors,
-                        startY = 0f,
-                        endY = horizonY
-                    ),
+                    brush = Brush.verticalGradient(colors = skyColors, startY = 0f, endY = horizonY),
                     topLeft = Offset.Zero,
                     size = Size(canvasWidth, horizonY)
                 )
-
-                // Horizon guidance glow line
-                val horizonGlowColor = if (isNightMode) Color(0xFF00E5FF).copy(alpha = 0.55f) else Color(0xFF0277BD).copy(alpha = 0.65f)
-                drawLine(
-                    color = horizonGlowColor,
-                    start = Offset(0f, horizonY),
-                    end = Offset(canvasWidth, horizonY),
-                    strokeWidth = 2.0f
+                drawRect(
+                    color = fieldBgColor,
+                    topLeft = Offset(0f, horizonY),
+                    size = Size(canvasWidth, canvasHeight - horizonY)
                 )
 
-                val tractorElevM = if (show3DTerrainMesh && terrainSquare != null) {
-                    terrainSquare.getElevationAt(tractorPivot)
-                } else 0.0
+                if (showSatelliteOverlay) {
+                    withTransform({
+                        clipRect(left = 0f, top = horizonY, right = canvasWidth, bottom = canvasHeight)
+                        rotate(degrees = -headingDeg.toFloat(), pivot = tractorScreenPos)
+                    }) {
+                        drawSatelliteTileLayer(anchorScreen = tractorScreenPos, tileAlpha = 0.88f)
+                    }
+                }
 
-                // Precise 3D Projection for World Points with Topographical DEM Elevation
-                fun project3D(worldPoint: Vec2, customElevMeters: Double? = null): Offset? {
-                    val dx = worldPoint.x - tractorPivot.x
-                    val dy = worldPoint.y - tractorPivot.y
-                    // Forward & Lateral relative to tractor track
-                    val forwardMeters = dx * sinH + dy * cosH
-                    val lateralMeters = dx * cosH - dy * sinH
+                val horizonGlowColor = when {
+                    isOledNight -> Color(0x73FF8C00)
+                    isDaylight -> Color(0xFF334155)
+                    else -> Color(0x8C00E5FF)
+                }
+                drawLine(color = horizonGlowColor, start = Offset(0f, horizonY), end = Offset(canvasWidth, horizonY), strokeWidth = 2.0f)
 
-                    val eyeOffsetBehind = 16.0
-                    val eyeDist = forwardMeters + eyeOffsetBehind
-                    if (eyeDist <= 1.0) return null // Behind camera near plane
+                val eyeOffsetBehind = 32.0
+                val focalDist = 54.0
+                val nearLimit = -30.0
+                val horizonLimit = 1500.0
+                val coverageHorizonLimit = 460.0 // Frustum far limit for coverage swath batching
+                val coverageLatHalf = 220.0
 
-                    // Perspective scaling with higher camera elevation & flatter depth
-                    val focalDist = 42.0
-                    val scale = (focalDist / (eyeDist + focalDist * 0.65)).toFloat()
-
-                    val dz = if (show3DTerrainMesh && terrainSquare != null) {
-                        (customElevMeters ?: terrainSquare.getElevationAt(worldPoint)) - tractorElevM
-                    } else 0.0
-                    val vertOffset = (dz * pixelsPerMeter * scale * 1.5).toFloat()
-
-                    val sx = tractorScreenPos.x + (lateralMeters * pixelsPerMeter * scale).toFloat()
-                    val sy = (tractorScreenPos.y - (forwardMeters * pixelsPerMeter * scale * 0.88f).toFloat() - vertOffset).coerceAtLeast(horizonY)
-
+                fun project3D(worldX: Double, worldY: Double): Offset? {
+                    val dx = worldX - tractorPivot.x
+                    val dy = worldY - tractorPivot.y
+                    val forwardM = dx * sinH + dy * cosH
+                    val lateralM = dx * cosH - dy * sinH
+                    val eyeDist = forwardM + eyeOffsetBehind
+                    if (eyeDist <= 1.0) return null
+                    val scale = (focalDist / (eyeDist + focalDist * 0.60)).toFloat()
+                    val sx = tractorScreenPos.x + (lateralM * pixelsPerMeter * scale).toFloat()
+                    val sy = (tractorScreenPos.y - (forwardM * pixelsPerMeter * scale * 0.90f).toFloat()).coerceAtLeast(horizonY)
                     return if (sy < horizonY - 4f) null else Offset(sx, sy)
                 }
 
-                // Robust 3D Line Drawing with Near-Plane and Horizon Segment Clipping
-                val targetDrop = (tractorScreenPos.y - horizonY).toDouble()
-                val C = pixelsPerMeter * 42.0 * 0.88
-                val horizonFwd = if (C > targetDrop + 1.0) {
-                    (43.3 * targetDrop / (C - targetDrop)).coerceIn(350.0, 3500.0)
-                } else {
-                    2800.0
-                }
+                fun project3D(worldPoint: Vec2): Offset? = project3D(worldPoint.x, worldPoint.y)
 
-                fun projectLocal(fwd: Double, lat: Double, elevOffsetM: Double = 0.0): Offset? {
-                    val eyeDist = fwd + 16.0
-                    if (eyeDist <= 1.0) return null
-                    val scale = (42.0 / (eyeDist + 27.3)).toFloat()
-                    val vertOffset = (elevOffsetM * pixelsPerMeter * scale * 1.5).toFloat()
-                    val sx = tractorScreenPos.x + (lat * pixelsPerMeter * scale).toFloat()
-                    val sy = (tractorScreenPos.y - (fwd * pixelsPerMeter * scale * 0.88f).toFloat() - vertOffset).coerceAtLeast(horizonY)
-                    return Offset(sx, sy)
+                fun append3DSegmentToPath(targetPath: Path, x1: Double, y1: Double, x2: Double, y2: Double, maxRange: Double = horizonLimit) {
+                    val dx1 = x1 - tractorPivot.x
+                    val dy1 = y1 - tractorPivot.y
+                    var sFwd = dx1 * sinH + dy1 * cosH
+                    var sLat = dx1 * cosH - dy1 * sinH
+
+                    val dx2 = x2 - tractorPivot.x
+                    val dy2 = y2 - tractorPivot.y
+                    var eFwd = dx2 * sinH + dy2 * cosH
+                    var eLat = dx2 * cosH - dy2 * sinH
+
+                    if (sFwd < nearLimit && eFwd < nearLimit) return
+                    if (sFwd > maxRange && eFwd > maxRange) return
+
+                    if (sFwd < nearLimit) {
+                        val denom = eFwd - sFwd
+                        if (abs(denom) < 1e-6) return
+                        val t = ((nearLimit - sFwd) / denom).coerceIn(0.0, 1.0)
+                        sLat += (eLat - sLat) * t
+                        sFwd = nearLimit
+                    } else if (sFwd > maxRange) {
+                        val denom = eFwd - sFwd
+                        if (abs(denom) < 1e-6) return
+                        val t = ((maxRange - sFwd) / denom).coerceIn(0.0, 1.0)
+                        sLat += (eLat - sLat) * t
+                        sFwd = maxRange
+                    }
+
+                    if (eFwd < nearLimit) {
+                        val denom = sFwd - eFwd
+                        if (abs(denom) < 1e-6) return
+                        val t = ((nearLimit - eFwd) / denom).coerceIn(0.0, 1.0)
+                        eLat += (sLat - eLat) * t
+                        eFwd = nearLimit
+                    } else if (eFwd > maxRange) {
+                        val denom = sFwd - eFwd
+                        if (abs(denom) < 1e-6) return
+                        val t = ((maxRange - eFwd) / denom).coerceIn(0.0, 1.0)
+                        eLat += (sLat - eLat) * t
+                        eFwd = maxRange
+                    }
+
+                    val eye1 = sFwd + eyeOffsetBehind
+                    val eye2 = eFwd + eyeOffsetBehind
+                    if (eye1 <= 1.0 || eye2 <= 1.0) return
+                    val sc1 = (focalDist / (eye1 + focalDist * 0.60)).toFloat()
+                    val sc2 = (focalDist / (eye2 + focalDist * 0.60)).toFloat()
+                    val sx1 = tractorScreenPos.x + (sLat * pixelsPerMeter * sc1).toFloat()
+                    val sy1 = (tractorScreenPos.y - (sFwd * pixelsPerMeter * sc1 * 0.90f).toFloat()).coerceAtLeast(horizonY)
+                    val sx2 = tractorScreenPos.x + (eLat * pixelsPerMeter * sc2).toFloat()
+                    val sy2 = (tractorScreenPos.y - (eFwd * pixelsPerMeter * sc2 * 0.90f).toFloat()).coerceAtLeast(horizonY)
+                    targetPath.moveTo(sx1, sy1)
+                    targetPath.lineTo(sx2, sy2)
                 }
 
                 fun draw3DLine(
@@ -310,883 +442,782 @@ fun GuidanceMapCanvas(
                     color: Color,
                     strokeWidth: Float,
                     pathEffect: PathEffect? = null,
-                    cap: StrokeCap = StrokeCap.Butt,
-                    elev1: Double? = null,
-                    elev2: Double? = null
+                    cap: StrokeCap = StrokeCap.Butt
                 ) {
                     val dx1 = p1.x - tractorPivot.x
                     val dy1 = p1.y - tractorPivot.y
-                    val fwd1 = dx1 * sinH + dy1 * cosH
-                    val lat1 = dx1 * cosH - dy1 * sinH
+                    var sFwd = dx1 * sinH + dy1 * cosH
+                    var sLat = dx1 * cosH - dy1 * sinH
 
                     val dx2 = p2.x - tractorPivot.x
                     val dy2 = p2.y - tractorPivot.y
-                    val fwd2 = dx2 * sinH + dy2 * cosH
-                    val lat2 = dx2 * cosH - dy2 * sinH
+                    var eFwd = dx2 * sinH + dy2 * cosH
+                    var eLat = dx2 * cosH - dy2 * sinH
 
-                    val dz1 = if (show3DTerrainMesh && terrainSquare != null) {
-                        (elev1 ?: terrainSquare.getElevationAt(p1)) - tractorElevM
-                    } else 0.0
-                    val dz2 = if (show3DTerrainMesh && terrainSquare != null) {
-                        (elev2 ?: terrainSquare.getElevationAt(p2)) - tractorElevM
-                    } else 0.0
+                    if (sFwd < nearLimit && eFwd < nearLimit) return
+                    if (sFwd > horizonLimit && eFwd > horizonLimit) return
 
-                    val nearLimit = -12.0 // Behind implement toolbar
-                    if (fwd1 < nearLimit && fwd2 < nearLimit) return // Completely behind camera
-                    if (fwd1 > horizonFwd && fwd2 > horizonFwd) return // Completely past horizon
-
-                    var startFwd = fwd1
-                    var startLat = lat1
-                    var startDz = dz1
-                    var endFwd = fwd2
-                    var endLat = lat2
-                    var endDz = dz2
-
-                    // Clip against near plane
-                    if (startFwd < nearLimit) {
-                        val t = ((nearLimit - startFwd) / (endFwd - startFwd)).coerceIn(0.0, 1.0)
-                        startLat += (endLat - startLat) * t
-                        startDz += (endDz - startDz) * t
-                        startFwd = nearLimit
-                    } else if (startFwd > horizonFwd) {
-                        val t = ((horizonFwd - startFwd) / (endFwd - startFwd)).coerceIn(0.0, 1.0)
-                        startLat += (endLat - startLat) * t
-                        startDz += (endDz - startDz) * t
-                        startFwd = horizonFwd
+                    if (sFwd < nearLimit) {
+                        val t = ((nearLimit - sFwd) / (eFwd - sFwd)).coerceIn(0.0, 1.0)
+                        sLat += (eLat - sLat) * t; sFwd = nearLimit
+                    } else if (sFwd > horizonLimit) {
+                        val t = ((horizonLimit - sFwd) / (eFwd - sFwd)).coerceIn(0.0, 1.0)
+                        sLat += (eLat - sLat) * t; sFwd = horizonLimit
+                    }
+                    if (eFwd < nearLimit) {
+                        val t = ((nearLimit - eFwd) / (sFwd - eFwd)).coerceIn(0.0, 1.0)
+                        eLat += (sLat - eLat) * t; eFwd = nearLimit
+                    } else if (eFwd > horizonLimit) {
+                        val t = ((horizonLimit - eFwd) / (sFwd - eFwd)).coerceIn(0.0, 1.0)
+                        eLat += (sLat - eLat) * t; eFwd = horizonLimit
                     }
 
-                    if (endFwd < nearLimit) {
-                        val t = ((nearLimit - endFwd) / (startFwd - endFwd)).coerceIn(0.0, 1.0)
-                        endLat += (startLat - endLat) * t
-                        endDz += (startDz - endDz) * t
-                        endFwd = nearLimit
-                    } else if (endFwd > horizonFwd) {
-                        val t = ((horizonFwd - endFwd) / (startFwd - endFwd)).coerceIn(0.0, 1.0)
-                        endLat += (startLat - endLat) * t
-                        endDz += (startDz - endDz) * t
-                        endFwd = horizonFwd
-                    }
-
-                    val sp1 = projectLocal(startFwd, startLat, startDz)
-                    val sp2 = projectLocal(endFwd, endLat, endDz)
-                    if (sp1 != null && sp2 != null) {
-                        drawLine(
-                            color = color,
-                            start = sp1,
-                            end = sp2,
-                            strokeWidth = strokeWidth,
-                            pathEffect = pathEffect,
-                            cap = cap
-                        )
-                    }
+                    val eye1 = sFwd + eyeOffsetBehind
+                    val eye2 = eFwd + eyeOffsetBehind
+                    if (eye1 <= 1.0 || eye2 <= 1.0) return
+                    val sc1 = (focalDist / (eye1 + focalDist * 0.60)).toFloat()
+                    val sc2 = (focalDist / (eye2 + focalDist * 0.60)).toFloat()
+                    val sx1 = tractorScreenPos.x + (sLat * pixelsPerMeter * sc1).toFloat()
+                    val sy1 = (tractorScreenPos.y - (sFwd * pixelsPerMeter * sc1 * 0.90f).toFloat()).coerceAtLeast(horizonY)
+                    val sx2 = tractorScreenPos.x + (eLat * pixelsPerMeter * sc2).toFloat()
+                    val sy2 = (tractorScreenPos.y - (eFwd * pixelsPerMeter * sc2 * 0.90f).toFloat()).coerceAtLeast(horizonY)
+                    drawLine(color = color, start = Offset(sx1, sy1), end = Offset(sx2, sy2), strokeWidth = strokeWidth, pathEffect = pathEffect, cap = cap)
                 }
 
-                // =========================================================================
-                // 3D TOPOGRAPHIC TERRAIN MESH (0.5 MILE × 0.5 MILE REAL-TIME ELEVATION DEM)
-                // =========================================================================
-                if (show3DTerrainMesh && terrainSquare != null) {
-                    // 1. Draw 3D 0.5-Mile Quarter Section Perimeter Wireframe (Glowing Cyan)
-                    val nwCorner = Vec2(terrainSquare.minX, terrainSquare.maxY)
-                    val neCorner = Vec2(terrainSquare.maxX, terrainSquare.maxY)
-                    val seCorner = Vec2(terrainSquare.maxX, terrainSquare.minY)
-                    val swCorner = Vec2(terrainSquare.minX, terrainSquare.minY)
+                // Zero-allocation Sutherland-Hodgman 3D quad clipper that appends directly into a batched Path!
+                fun append3DQuadToPath(
+                    targetPath: Path,
+                    p1x: Double, p1y: Double,
+                    p2x: Double, p2y: Double,
+                    p3x: Double, p3y: Double,
+                    p4x: Double, p4y: Double
+                ) {
+                    val inX = scratch.quadInX
+                    val inY = scratch.quadInY
+                    inX[0] = p1x; inY[0] = p1y
+                    inX[1] = p2x; inY[1] = p2y
+                    inX[2] = p3x; inY[2] = p3y
+                    inX[3] = p4x; inY[3] = p4y
 
-                    val topoBoundColor = Color(0xFF00E5FF).copy(alpha = 0.85f)
-                    val boundStroke = 2.5f
-                    val boundDash = PathEffect.dashPathEffect(floatArrayOf(14f, 8f), 0f)
+                    var allBehind = true
+                    var allBeyond = true
+                    for (i in 0 until 4) {
+                        val fwd = (inX[i] - tractorPivot.x) * sinH + (inY[i] - tractorPivot.y) * cosH
+                        if (fwd >= nearLimit) allBehind = false
+                        if (fwd <= coverageHorizonLimit) allBeyond = false
+                    }
+                    if (allBehind || allBeyond) return
 
-                    draw3DLine(nwCorner, neCorner, topoBoundColor, boundStroke, boundDash)
-                    draw3DLine(neCorner, seCorner, topoBoundColor, boundStroke, boundDash)
-                    draw3DLine(seCorner, swCorner, topoBoundColor, boundStroke, boundDash)
-                    draw3DLine(swCorner, nwCorner, topoBoundColor, boundStroke, boundDash)
+                    val outX = scratch.clipX
+                    val outY = scratch.clipY
+                    var outCount = 0
 
-                    // 2. Draw 3D Elevation Topo Contours across the 0.5-mile terrain
-                    for (contour in terrainSquare.contours) {
-                        if (contour.points.size < 2) continue
-                        val isIndex = contour.isIndexContour
-                        val contourColor = if (isIndex) {
-                            Color(0xFFFFD54F).copy(alpha = 0.95f) // Index contour (gold)
-                        } else {
-                            Color(0xFF81C784).copy(alpha = 0.65f) // Intermediate contour (emerald)
-                        }
-                        val strokeW = if (isIndex) 2.2f else 1.2f
-                        val pathEffect = if (isIndex) null else PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                    for (i in 0 until 4) {
+                        val nx = if (i == 3) 0 else i + 1
+                        val cx = inX[i]; val cy = inY[i]
+                        val ex = inX[nx]; val ey = inY[nx]
+                        val curFwd = (cx - tractorPivot.x) * sinH + (cy - tractorPivot.y) * cosH
+                        val nextFwd = (ex - tractorPivot.x) * sinH + (ey - tractorPivot.y) * cosH
+                        val curIn = curFwd >= nearLimit && curFwd <= coverageHorizonLimit
+                        val nextIn = nextFwd >= nearLimit && nextFwd <= coverageHorizonLimit
 
-                        for (cIdx in 0 until contour.points.size - 1) {
-                            draw3DLine(
-                                p1 = contour.points[cIdx],
-                                p2 = contour.points[cIdx + 1],
-                                color = contourColor,
-                                strokeWidth = strokeW,
-                                pathEffect = pathEffect,
-                                elev1 = contour.elevationMetersMsl,
-                                elev2 = contour.elevationMetersMsl
-                            )
+                        if (curIn && nextIn) {
+                            outX[outCount] = ex; outY[outCount] = ey; outCount++
+                        } else if (curIn && !nextIn) {
+                            val limit = if (nextFwd < nearLimit) nearLimit else coverageHorizonLimit
+                            val denom = nextFwd - curFwd
+                            if (abs(denom) > 1e-6) {
+                                val t = ((limit - curFwd) / denom).coerceIn(0.0, 1.0)
+                                outX[outCount] = cx + (ex - cx) * t
+                                outY[outCount] = cy + (ey - cy) * t
+                                outCount++
+                            }
+                        } else if (!curIn && nextIn) {
+                            val limit = if (curFwd < nearLimit) nearLimit else coverageHorizonLimit
+                            val denom = nextFwd - curFwd
+                            if (abs(denom) > 1e-6) {
+                                val t = ((limit - curFwd) / denom).coerceIn(0.0, 1.0)
+                                outX[outCount] = cx + (ex - cx) * t
+                                outY[outCount] = cy + (ey - cy) * t
+                                outCount++
+                            }
+                            outX[outCount] = ex; outY[outCount] = ey; outCount++
                         }
                     }
-                }
 
-                // --- 3D FIELD GRID (CLEAN, OPTIMIZED FOR 60-120 FPS REFRESH RATE) ---
-                val forwardSpacingM = 10.0 // 10m grid spacing for optimal 120fps performance
-                val lateralSpacingM = 10.0
-                val maxForwardDist = horizonFwd
-                val maxLateralDist = 180.0
+                    if (outCount < 3) return
 
-                // Forward-running track grid lines
-                var latOffset = -maxLateralDist
-                while (latOffset <= maxLateralDist) {
-                    val pStartWorld = tractorPivot + (rightVec * latOffset) - (fwdVec * 12.0)
-                    val pEndWorld = tractorPivot + (rightVec * latOffset) + (fwdVec * maxForwardDist)
-                    val isMajor = abs(latOffset % (lateralSpacingM * 3)) < 0.5
-                    val gridAlpha = if (isMajor) 0.5f else 0.2f
-                    draw3DLine(
-                        p1 = pStartWorld,
-                        p2 = pEndWorld,
-                        color = gridLineColor.copy(alpha = gridAlpha),
-                        strokeWidth = if (isMajor) 1.5f else 0.8f
-                    )
-                    latOffset += lateralSpacingM
-                }
+                    val px = scratch.projX
+                    val py = scratch.projY
+                    var pCount = 0
+                    for (i in 0 until outCount) {
+                        val dx = outX[i] - tractorPivot.x
+                        val dy = outY[i] - tractorPivot.y
+                        val forwardM = dx * sinH + dy * cosH
+                        val lateralM = dx * cosH - dy * sinH
+                        val eyeDist = forwardM + eyeOffsetBehind
+                        if (eyeDist <= 1.0) continue
+                        val sc = (focalDist / (eyeDist + focalDist * 0.60)).toFloat()
+                        val sx = tractorScreenPos.x + (lateralM * pixelsPerMeter * sc).toFloat()
+                        val sy = (tractorScreenPos.y - (forwardM * pixelsPerMeter * sc * 0.90f).toFloat()).coerceAtLeast(horizonY)
+                        if (sy >= horizonY - 4f) {
+                            px[pCount] = sx; py[pCount] = sy; pCount++
+                        }
+                    }
 
-                // Lateral cross grid lines
-                val forwardProgress = (tractorPivot.x * sinH + tractorPivot.y * cosH)
-                val rawMod = ((forwardProgress % forwardSpacingM) + forwardSpacingM) % forwardSpacingM
-                val scrollOffset = (forwardSpacingM - rawMod) % forwardSpacingM
-                var fwdDist = -12.0 + scrollOffset
-                while (fwdDist <= maxForwardDist) {
-                    val pLeftWorld = tractorPivot + (fwdVec * fwdDist) - (rightVec * maxLateralDist)
-                    val pRightWorld = tractorPivot + (fwdVec * fwdDist) + (rightVec * maxLateralDist)
-                    val isMajor = abs((fwdDist + (forwardProgress - scrollOffset)) % (forwardSpacingM * 3)) < 1.5
-                    val distFraction = ((fwdDist + 12.0) / (maxForwardDist + 12.0)).toFloat().coerceIn(0f, 1f)
-                    val fadeFactor = (1.0f - distFraction * 0.65f).coerceIn(0.2f, 1.0f)
-                    val baseAlpha = if (isMajor) 0.5f else 0.2f
-                    draw3DLine(
-                        p1 = pLeftWorld,
-                        p2 = pRightWorld,
-                        color = gridLineColor.copy(alpha = baseAlpha * fadeFactor),
-                        strokeWidth = if (isMajor) 1.5f else 0.8f
-                    )
-                    fwdDist += if (fwdDist > 80.0) forwardSpacingM * 2 else forwardSpacingM
-                }
-
-                // 1. Infield Coverage Rendering (Applied Segments in 3D with Viewport Distance Culling)
-                val maxRenderDistSq = 240.0 * 240.0
-                for (i in appliedSegments.indices) {
-                    val seg = appliedSegments[i]
-                    val dx = seg.center.x - tractorPivot.x
-                    val dy = seg.center.y - tractorPivot.y
-                    if (dx * dx + dy * dy > maxRenderDistSq) continue
-
-                    val p1 = project3D(seg.leftStart)
-                    val p2 = project3D(seg.rightStart)
-                    val p3 = project3D(seg.rightEnd)
-                    val p4 = project3D(seg.leftEnd)
-
-                    if (p1 != null && p2 != null && p3 != null && p4 != null) {
-                        reusableSegPath.reset()
-                        reusableSegPath.moveTo(p1.x, p1.y)
-                        reusableSegPath.lineTo(p2.x, p2.y)
-                        reusableSegPath.lineTo(p3.x, p3.y)
-                        reusableSegPath.lineTo(p4.x, p4.y)
-                        reusableSegPath.close()
-                        drawPath(
-                            path = reusableSegPath,
-                            color = baseCoverageColor,
-                            style = Fill
-                        )
+                    if (pCount >= 3) {
+                        targetPath.moveTo(px[0], py[0])
+                        for (j in 1 until pCount) {
+                            targetPath.lineTo(px[j], py[j])
+                        }
+                        targetPath.close()
                     }
                 }
 
-                // Smooth Live Brush Head in 3D (Connects last segment directly to live toolbar in real time)
-                val isImplementWorking3D = vehicleState.isAutoSteerEngaged || implementConfig.isMasterActive
-                if (isImplementWorking3D && abs(vehicleState.speedKmh) > 0.3) {
+                // --- 2. 3D FIELD PERSPECTIVE GRID ---
+                val gridStepM = 15.0
+                val maxFwdM = 540.0
+                val maxLatM = 180.0
+                val majorGridAlpha = if (isDaylight) 0.55f else 0.45f
+                val minorGridAlpha = if (isDaylight) 0.28f else 0.20f
+
+                var lat = -maxLatM
+                while (lat <= maxLatM) {
+                    val isMajor = abs(lat % (gridStepM * 3)) < 0.5
+                    draw3DLine(
+                        tractorPivot + (rightVec * lat) - (fwdVec * 20.0),
+                        tractorPivot + (rightVec * lat) + (fwdVec * maxFwdM),
+                        gridLineColor.copy(alpha = if (isMajor) majorGridAlpha else minorGridAlpha),
+                        if (isMajor) 1.5f else 0.85f
+                    )
+                    lat += gridStepM
+                }
+                var fwd = -20.0
+                while (fwd <= maxFwdM) {
+                    val isMajor = abs(fwd % (gridStepM * 3)) < 0.5
+                    draw3DLine(
+                        tractorPivot - (rightVec * maxLatM) + (fwdVec * fwd),
+                        tractorPivot + (rightVec * maxLatM) + (fwdVec * fwd),
+                        gridLineColor.copy(alpha = if (isMajor) majorGridAlpha else minorGridAlpha),
+                        if (isMajor) 1.5f else 0.85f
+                    )
+                    fwd += gridStepM
+                }
+
+                // --- 3. 3D TOPOGRAPHIC CONTOURS (Batched into 2 reusable Paths — zero per-line draw overhead) ---
+                if (showTopographyMap && liveTerrainSquare != null) {
+                    val nw = Vec2(liveTerrainSquare.minX, liveTerrainSquare.maxY)
+                    val ne = Vec2(liveTerrainSquare.maxX, liveTerrainSquare.maxY)
+                    val se = Vec2(liveTerrainSquare.maxX, liveTerrainSquare.minY)
+                    val sw = Vec2(liveTerrainSquare.minX, liveTerrainSquare.minY)
+                    val boxColor = if (isDaylight) Color(0xAA0369A1) else Color(0xB300E5FF)
+                    draw3DLine(nw, ne, boxColor, 2f, scratch.dashTopoBox)
+                    draw3DLine(ne, se, boxColor, 2f, scratch.dashTopoBox)
+                    draw3DLine(se, sw, boxColor, 2f, scratch.dashTopoBox)
+                    draw3DLine(sw, nw, boxColor, 2f, scratch.dashTopoBox)
+
+                    scratch.indexContourPath.reset()
+                    scratch.minorContourPath.reset()
+                    val contours = liveTerrainSquare.contours
+                    for (ci in contours.indices) {
+                        val c = contours[ci]
+                        val pts = c.points
+                        if (pts.size < 2) continue
+                        val target = if (c.isIndexContour) scratch.indexContourPath else scratch.minorContourPath
+                        for (i in 0 until pts.size - 1) {
+                            append3DSegmentToPath(target, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, maxRange = 650.0)
+                        }
+                    }
+                    drawPath(path = scratch.minorContourPath, color = minorContourColor, style = scratch.strokeMinorContour)
+                    drawPath(path = scratch.indexContourPath, color = indexContourColor, style = scratch.strokeIndexContour)
+                }
+
+                // --- 4. 3D APPLIED COVERAGE (Chunked Frustum Culling + Single Batched GPU DrawCall) ---
+                scratch.coverageBatchPath.reset()
+                var lastRenderedSeg: AppliedSwathSegment? = null
+                if (coverageChunkStore != null) {
+                    coverageChunkStore.forEachVisibleIn3DFrustum(
+                        pivotX = tractorPivot.x,
+                        pivotY = tractorPivot.y,
+                        sinH = sinH,
+                        cosH = cosH,
+                        nearLimit = nearLimit,
+                        farLimit = coverageHorizonLimit,
+                        maxLateral = coverageLatHalf
+                    ) { seg ->
+                        append3DQuadToPath(
+                            scratch.coverageBatchPath,
+                            seg.leftStart.x, seg.leftStart.y,
+                            seg.rightStart.x, seg.rightStart.y,
+                            seg.rightEnd.x, seg.rightEnd.y,
+                            seg.leftEnd.x, seg.leftEnd.y
+                        )
+                    }
+                    lastRenderedSeg = coverageChunkStore.lastSegment
+                } else {
+                    for (i in appliedSegments.indices) {
+                        val seg = appliedSegments[i]
+                        append3DQuadToPath(
+                            scratch.coverageBatchPath,
+                            seg.leftStart.x, seg.leftStart.y,
+                            seg.rightStart.x, seg.rightStart.y,
+                            seg.rightEnd.x, seg.rightEnd.y,
+                            seg.leftEnd.x, seg.leftEnd.y
+                        )
+                    }
+                    lastRenderedSeg = appliedSegments.lastOrNull()
+                }
+
+                // Smooth live brush bridge in 3D
+                val isHitchLowered3D = threePointState == ThreePointState.LOWERED || threePointState == ThreePointState.FLOAT
+                val isWorking3D = isHitchLowered3D && (liveVehicle.isAutoSteerEngaged || implementConfig.isMasterActive) && tempPointA == null
+                if (isWorking3D && abs(liveVehicle.speedKmh) > 0.15 && lastRenderedSeg != null) {
                     val toolbarDistM = vehicleConfig.hitchLength - implementConfig.offsetBehindTractor
-                    val liveBoomCenter = tractorPivot + (fwdVec * toolbarDistM)
-                    val halfBoomM = implementConfig.toolWidth * 0.5
-                    val liveBoomLeft = liveBoomCenter - (rightVec * halfBoomM)
-                    val liveBoomRight = liveBoomCenter + (rightVec * halfBoomM)
+                    val liveCenter3D = tractorPivot + (fwdVec * toolbarDistM)
+                    val halfBoom3D = implementConfig.toolWidth * 0.5
+                    val liveBoomLeft3D = liveCenter3D - (rightVec * halfBoom3D)
+                    val liveBoomRight3D = liveCenter3D + (rightVec * halfBoom3D)
+                    append3DQuadToPath(
+                        scratch.coverageBatchPath,
+                        lastRenderedSeg.leftEnd.x, lastRenderedSeg.leftEnd.y,
+                        lastRenderedSeg.rightEnd.x, lastRenderedSeg.rightEnd.y,
+                        liveBoomRight3D.x, liveBoomRight3D.y,
+                        liveBoomLeft3D.x, liveBoomLeft3D.y
+                    )
+                }
 
-                    val lastSeg = appliedSegments.lastOrNull()
-                    val startLeft = lastSeg?.leftEnd ?: liveBoomLeft
-                    val startRight = lastSeg?.rightEnd ?: liveBoomRight
+                if (!scratch.coverageBatchPath.isEmpty) {
+                    drawPath(path = scratch.coverageBatchPath, color = baseCoverageColor)
+                    drawPath(path = scratch.coverageBatchPath, color = coverageBorderColor, style = scratch.strokeCoverageEdge)
+                }
 
-                    val p1 = project3D(startLeft)
-                    val p2 = project3D(startRight)
-                    val p3 = project3D(liveBoomRight)
-                    val p4 = project3D(liveBoomLeft)
+                // Helper for 3D Surveyor Flagpole Marker (zero-alloc reusable scratchPath)
+                fun draw3DSurveyorFlag(worldPos: Vec2, label: String, flagColor: Color) {
+                    val sp = project3D(worldPos)
+                    if (sp != null) {
+                        val basePulseRad = 18.dp.toPx() * pulseScale
+                        drawCircle(color = flagColor.copy(alpha = pulseAlpha * 0.5f), radius = basePulseRad, center = sp)
+                        drawCircle(color = flagColor, radius = 9.dp.toPx(), center = sp)
+                        drawCircle(color = Color(0xFF0F172A), radius = 6.dp.toPx(), center = sp)
 
-                    if (p1 != null && p2 != null && p3 != null && p4 != null) {
-                        reusableSegPath.reset()
-                        reusableSegPath.moveTo(p1.x, p1.y)
-                        reusableSegPath.lineTo(p2.x, p2.y)
-                        reusableSegPath.lineTo(p3.x, p3.y)
-                        reusableSegPath.lineTo(p4.x, p4.y)
-                        reusableSegPath.close()
-                        drawPath(
-                            path = reusableSegPath,
-                            color = baseCoverageColor,
-                            style = Fill
+                        val arm = 15.dp.toPx()
+                        drawLine(color = flagColor, start = Offset(sp.x - arm, sp.y), end = Offset(sp.x + arm, sp.y), strokeWidth = 2.0f)
+                        drawLine(color = flagColor, start = Offset(sp.x, sp.y - arm), end = Offset(sp.x, sp.y + arm), strokeWidth = 2.0f)
+
+                        val poleHeight = 52.dp.toPx()
+                        val poleTop = Offset(sp.x, sp.y - poleHeight)
+                        drawLine(color = Color.White, start = sp, end = poleTop, strokeWidth = 3.5f, cap = StrokeCap.Round)
+                        drawLine(color = Color(0xFF0F172A), start = sp, end = poleTop, strokeWidth = 1.5f, cap = StrokeCap.Round)
+
+                        val flagW = 40.dp.toPx()
+                        val flagH = 25.dp.toPx()
+                        scratch.scratchPath.reset()
+                        scratch.scratchPath.moveTo(poleTop.x, poleTop.y)
+                        scratch.scratchPath.lineTo(poleTop.x + flagW, poleTop.y + flagH * 0.5f)
+                        scratch.scratchPath.lineTo(poleTop.x, poleTop.y + flagH)
+                        scratch.scratchPath.close()
+                        drawPath(path = scratch.scratchPath, color = flagColor)
+                        drawPath(path = scratch.scratchPath, color = Color.White, style = scratch.strokeMedium)
+
+                        textPaint.color = android.graphics.Color.WHITE
+                        textPaint.textSize = 22f
+                        drawContext.canvas.nativeCanvas.drawText(label, poleTop.x + 14.dp.toPx(), poleTop.y + 18.dp.toPx(), textPaint)
+                    } else if (tempPointA != null) {
+                        val distToTractor = worldPos.distanceTo(tractorPivot)
+                        val distFt = distToTractor * 3.28084
+                        val deltaX = worldPos.x - tractorPivot.x
+                        val deltaY = worldPos.y - tractorPivot.y
+                        val bearingDeg = (Math.toDegrees(atan2(deltaX, deltaY)) + 360.0) % 360.0
+                        val hudText = String.format(Locale.US, "POINT %s [LOCKED]: %.1fm (%.0fft) | %03.0f° BEHIND", label, distToTractor, distFt, bearingDeg)
+                        textPaint.textSize = 20f
+                        val textW = textPaint.measureText(hudText)
+                        val beaconY = (canvasHeight * 0.72f).coerceAtMost(canvasHeight - 115.dp.toPx())
+                        drawRoundRect(
+                            color = Color(0xEE0F172A),
+                            topLeft = Offset(canvasWidth * 0.5f - textW * 0.5f - 16f, beaconY - 32f),
+                            size = Size(textW + 32f, 44f),
+                            cornerRadius = CornerRadius(12f, 12f)
                         )
+                        drawRoundRect(
+                            color = flagColor,
+                            topLeft = Offset(canvasWidth * 0.5f - textW * 0.5f - 16f, beaconY - 32f),
+                            size = Size(textW + 32f, 44f),
+                            cornerRadius = CornerRadius(12f, 12f),
+                            style = scratch.strokeMedium
+                        )
+                        textPaint.color = if (label == "A") android.graphics.Color.CYAN else android.graphics.Color.YELLOW
+                        drawContext.canvas.nativeCanvas.drawText(hudText, canvasWidth * 0.5f, beaconY - 3f, textPaint)
                     }
                 }
 
-                // 2. Field Boundary in 3D
+                // --- 5. 3D AB GUIDANCE LINES & PARALLEL SWATHS (High-Contrast Halo + Vivid Core) ---
+                if (currentABLine != null) {
+                    val swathW = implementConfig.swathWidth
+                    val activeIdx = liveVehicle.activeSwathIndex
+                    val lineDir = currentABLine.dirVector
+                    val lineNormal = currentABLine.normalVector
+                    val lineLengthMeters = 2000.0
+
+                    for (passOffset in -10..10) {
+                        val passIndex = activeIdx + passOffset
+                        val swathOrigin = currentABLine.aLocal + (lineNormal * (passIndex * swathW))
+                        val pStart = swathOrigin - (lineDir * lineLengthMeters)
+                        val pEnd = swathOrigin + (lineDir * lineLengthMeters)
+
+                        if (passOffset == 0) {
+                            // Crisp high-contrast halo + bold active A-B line
+                            draw3DLine(pStart, pEnd, activeSwathHaloColor, 10.5f, cap = StrokeCap.Round)
+                            draw3DLine(pStart, pEnd, activeSwathColor, 5.2f, cap = StrokeCap.Round)
+                        } else {
+                            draw3DLine(pStart, pEnd, parallelSwathColor, 2.2f, scratch.dashParallel)
+                        }
+                    }
+
+                    draw3DSurveyorFlag(currentABLine.aLocal, "A", Color(0xFF00E5FF))
+                    draw3DSurveyorFlag(currentABLine.bLocal, "B", Color(0xFFF59E0B))
+                }
+
+                // --- 5.5 3D DASHED HEADLAND U-TURN PREVIEW ARC ---
+                if (liveUTurnPath.size >= 2) {
+                    scratch.uTurnPath.reset()
+                    for (i in 0 until liveUTurnPath.size - 1) {
+                        append3DSegmentToPath(
+                            scratch.uTurnPath,
+                            liveUTurnPath[i].x, liveUTurnPath[i].y,
+                            liveUTurnPath[i + 1].x, liveUTurnPath[i + 1].y,
+                            maxRange = 450.0
+                        )
+                    }
+                    if (!scratch.uTurnPath.isEmpty) {
+                        drawPath(path = scratch.uTurnPath, color = uTurnHaloColor, style = scratch.strokeTurnHalo)
+                        drawPath(path = scratch.uTurnPath, color = uTurnArcColor, style = scratch.strokeTurnDash)
+                        val endPt = project3D(liveUTurnPath.last())
+                        if (endPt != null) {
+                            drawCircle(color = uTurnHaloColor, radius = 8f, center = endPt)
+                            drawCircle(color = uTurnArcColor, radius = 5f, center = endPt)
+                        }
+                    }
+                }
+
+                // --- 6. Field & Headland Boundaries in 3D ---
                 if (fieldBoundary.size >= 2) {
                     for (i in fieldBoundary.indices) {
                         val nextIdx = (i + 1) % fieldBoundary.size
-                        draw3DLine(
-                            p1 = fieldBoundary[i],
-                            p2 = fieldBoundary[nextIdx],
-                            color = if (isRecordingBoundary) Color(0xFFFF5252) else boundaryColor,
-                            strokeWidth = 2.8f
-                        )
+                        draw3DLine(fieldBoundary[i], fieldBoundary[nextIdx], boundaryColor, 3.2f)
                     }
                 }
-
-                // 3. Headland Boundary in 3D
                 if (headlandBoundary.size >= 2) {
                     for (i in headlandBoundary.indices) {
                         val nextIdx = (i + 1) % headlandBoundary.size
-                        draw3DLine(
-                            p1 = headlandBoundary[i],
-                            p2 = headlandBoundary[nextIdx],
-                            color = headlandColor,
-                            strokeWidth = 2.0f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f)
-                        )
+                        draw3DLine(headlandBoundary[i], headlandBoundary[nextIdx], headlandColor, 2.2f, scratch.dashHeadland)
                     }
                 }
 
-                // 4. RTK Base Station Tower & Baseline in 3D
-                if (rtkBaseConfig.isEnabled) {
-                    val rtkLocal = Vec2(rtkBaseConfig.relativeX, rtkBaseConfig.relativeY)
-                    val spRtk = project3D(rtkLocal)
-                    if (spRtk != null) {
-                        reusableTowerPath.reset()
-                        reusableTowerPath.moveTo(spRtk.x, spRtk.y - 14.dp.toPx())
-                        reusableTowerPath.lineTo(spRtk.x - 8.dp.toPx(), spRtk.y + 6.dp.toPx())
-                        reusableTowerPath.lineTo(spRtk.x + 8.dp.toPx(), spRtk.y + 6.dp.toPx())
-                        reusableTowerPath.close()
-                        drawPath(reusableTowerPath, Color(0xFF00E5FF), style = Fill)
-                        drawCircle(Color(0xFFFFD54F), radius = 3.5.dp.toPx(), center = Offset(spRtk.x, spRtk.y - 14.dp.toPx()))
-
-                        draw3DLine(
-                            p1 = rtkLocal,
-                            p2 = tractorPivot,
-                            color = Color(0x6600E5FF),
-                            strokeWidth = 1.4f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                        )
-                    }
+                // 3D Obstacles
+                for (i in obstacles.indices) {
+                    val obs = obstacles[i]
+                    val sp = project3D(obs.localPos) ?: continue
+                    drawCircle(color = obs.type.displayColor.copy(alpha = 0.28f), radius = 14.dp.toPx(), center = sp)
+                    drawCircle(color = obs.type.displayColor, radius = 6.dp.toPx(), center = sp)
+                    drawCircle(color = Color.Black, radius = 3.dp.toPx(), center = sp)
                 }
 
-                // 5. Guidance Swath Lines in 3D (AB lines or Contour Curve)
-                if (guidanceMode == GuidanceMode.CONTOUR_CURVE && currentCurveLine != null && currentCurveLine.points.size >= 2) {
-                    val curvePts = currentCurveLine.points
-                    val swathW = implementConfig.swathWidth
-                    val activeIdx = vehicleState.activeSwathIndex
-                    for (offset in -3..3) {
-                        val passIdx = activeIdx + offset
-                        val isTarget = (offset == 0)
-                        val passColor = if (isTarget) activeSwathColor else parallelSwathColor
-                        val strokeW = if (isTarget) 4.5f else 1.8f
-
-                        for (i in 0 until curvePts.size - 1) {
-                            val p0 = curvePts[i]
-                            val p1 = curvePts[i + 1]
-                            val dir = (p1 - p0).normalized()
-                            val norm = dir.perpClockwise()
-                            val shift = norm * (passIdx * swathW)
-
-                            draw3DLine(
-                                p1 = p0 + shift,
-                                p2 = p1 + shift,
-                                color = passColor,
-                                strokeWidth = strokeW,
-                                pathEffect = if (isTarget) null else PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f),
-                                cap = StrokeCap.Round
-                            )
-                        }
-                    }
-                } else if (currentABLine != null) {
-                    val swathW = implementConfig.swathWidth
-                    val activeIndex = vehicleState.activeSwathIndex
-                    val lineDir = currentABLine.dirVector
-                    val lineNormal = currentABLine.normalVector
-
-                    for (passOffset in -5..5) {
-                        val passIndex = activeIndex + passOffset
-                        val swathOrigin = currentABLine.aLocal + (lineNormal * (passIndex * swathW))
-
-                        // Project tractor position onto the swath line to center the line dynamically
-                        val toTractor = tractorPivot - swathOrigin
-                        val distAlongLine = toTractor.x * lineDir.x + toTractor.y * lineDir.y
-                        val currentSwathCenter = swathOrigin + (lineDir * distAlongLine)
-
-                        // Ensure effective line vector points forward in direction of vehicle travel
-                        val lineDirDotTractorFwd = lineDir.x * sinH + lineDir.y * cosH
-                        val effectiveDir = if (lineDirDotTractorFwd >= 0.0) lineDir else (lineDir * -1.0)
-
-                        val pStart = currentSwathCenter - (effectiveDir * 15.0)
-                        val pEnd = currentSwathCenter + (effectiveDir * maxForwardDist.coerceAtMost(1600.0))
-
-                        val isTarget = (passOffset == 0)
-                        if (isTarget) {
-                            draw3DLine(
-                                p1 = pStart,
-                                p2 = pEnd,
-                                color = activeSwathColor.copy(alpha = 0.22f),
-                                strokeWidth = 9.0f,
-                                cap = StrokeCap.Round
-                            )
-                        }
-                        draw3DLine(
-                            p1 = pStart,
-                            p2 = pEnd,
-                            color = if (isTarget) activeSwathColor else parallelSwathColor,
-                            strokeWidth = if (isTarget) 4.0f else 1.8f,
-                            pathEffect = if (isTarget) null else PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f),
-                            cap = StrokeCap.Round
-                        )
-                    }
-                }
-
-                // 6. 3D U-Turn Dubins Arc Preview
-                if (uTurnPath.size >= 2) {
-                    for (i in 0 until uTurnPath.size - 1) {
-                        draw3DLine(
-                            p1 = uTurnPath[i],
-                            p2 = uTurnPath[i + 1],
-                            color = Color(0xFF00E5FF),
-                            strokeWidth = 3.0f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                        )
-                    }
-                }
-
-                // 7. 3D Field Obstacles & Hazards
-                for (obs in obstacles) {
-                    val sp = project3D(obs.localPos)
-                    if (sp != null) {
-                        val radiusPx = (obs.radiusMeters * pixelsPerMeter * 0.75f).toFloat().coerceIn(8f, 70f)
-                        drawCircle(
-                            color = obs.type.displayColor.copy(alpha = 0.30f),
-                            radius = radiusPx,
-                            center = sp
-                        )
-                        drawCircle(
-                            color = obs.type.displayColor,
-                            radius = 8.dp.toPx(),
-                            center = sp
-                        )
-                        drawCircle(
-                            color = Color.Black,
-                            radius = 3.5.dp.toPx(),
-                            center = sp
-                        )
-                    }
-                }
-
-                // 8. Draw Tractor Vehicle Model in Cab View
-                drawTractorVehicle(
-                    pixelsPerMeter = pixelsPerMeter * 1.15f,
+                // --- 7. 3D Tractor & Implement Model (Steered Front Wheels + 3-Point Hitch State) ---
+                drawTractorIn3D(
                     center = tractorScreenPos,
+                    pixelsPerMeter = pixelsPerMeter,
                     vehicleConfig = vehicleConfig,
                     implementConfig = implementConfig,
-                    actualSteerDeg = vehicleState.actualSteerAngleDeg,
-                    isAutoSteerEngaged = vehicleState.isAutoSteerEngaged,
-                    sectionStates = vehicleState.sectionStates,
-                    slidingHitchConfig = slidingHitchConfig,
-                    slidingHitchState = slidingHitchState
+                    actualSteerDeg = liveVehicle.actualSteerAngleDeg,
+                    isAutoSteerEngaged = liveVehicle.isAutoSteerEngaged,
+                    isMasterActive = implementConfig.isMasterActive,
+                    threePointState = threePointState,
+                    sectionStates = liveVehicle.sectionStates,
+                    themeMode = themeMode,
+                    scratch = scratch
                 )
 
+                // --- 8. POINT A LIVE TRACKING IN 3D ---
+                if (tempPointA != null) {
+                    val distAtoTractor = tempPointA.distanceTo(tractorPivot)
+                    val distFt = distAtoTractor * 3.28084
+                    val deltaX = tractorPivot.x - tempPointA.x
+                    val deltaY = tractorPivot.y - tempPointA.y
+                    val bearingDeg = if (distAtoTractor >= 0.3) {
+                        (Math.toDegrees(atan2(deltaX, deltaY)) + 360.0) % 360.0
+                    } else {
+                        (headingDeg + 360.0) % 360.0
+                    }
+                    val swathDir = if (distAtoTractor >= 0.8) (tractorPivot - tempPointA).normalized() else Vec2(sinH, cosH)
+                    val swathNorm = Vec2(swathDir.y, -swathDir.x)
+                    val safeBottomY = (canvasHeight - 140.dp.toPx()).coerceAtLeast(tractorScreenPos.y + 45.dp.toPx())
+                    val fwdHorizon = tractorPivot + (swathDir * 1200.0)
+                    val halfSwath = implementConfig.toolWidth * 0.5
+
+                    draw3DLine(tempPointA + (swathNorm * halfSwath), fwdHorizon + (swathNorm * halfSwath), Color(0xA638BDF8), 2.4f, scratch.dashCorridor)
+                    draw3DLine(tempPointA - (swathNorm * halfSwath), fwdHorizon - (swathNorm * halfSwath), Color(0xA638BDF8), 2.4f, scratch.dashCorridor)
+                    for (passOffset in -4..4) {
+                        if (passOffset == 0) continue
+                        val pOffset = swathNorm * (passOffset * implementConfig.swathWidth)
+                        draw3DLine(tempPointA + pOffset, fwdHorizon + pOffset, Color(0x730284C7), 1.8f, scratch.dashParallel)
+                    }
+
+                    if (liveAbTrail.size >= 2) {
+                        for (i in 0 until liveAbTrail.size - 1) {
+                            draw3DLine(liveAbTrail[i], liveAbTrail[i + 1], Color(0xE600E5FF), 5.0f)
+                        }
+                    }
+
+                    draw3DLine(tempPointA, fwdHorizon, Color(0x6100E5FF), 13.0f)
+                    draw3DLine(tempPointA, fwdHorizon, Color(0xFF00E5FF), 5.5f)
+
+                    val spHorizon = project3D(fwdHorizon) ?: Offset(canvasWidth * 0.5f, horizonY)
+                    drawLine(Color(0x6600E5FF), tractorScreenPos, spHorizon, strokeWidth = 10.0f, cap = StrokeCap.Round)
+                    drawLine(Color(0xFF00E5FF), tractorScreenPos, spHorizon, strokeWidth = 4.2f, cap = StrokeCap.Round)
+
+                    val spA = project3D(tempPointA)
+                    if (spA != null && spA.y in horizonY..safeBottomY) {
+                        drawLine(Color(0x7300E5FF), spA, tractorScreenPos, strokeWidth = 11.0f, cap = StrokeCap.Round)
+                        drawLine(Color(0xFF00E5FF), spA, tractorScreenPos, strokeWidth = 4.8f, cap = StrokeCap.Round)
+                        draw3DSurveyorFlag(tempPointA, "A", Color(0xFF00E5FF))
+                    } else {
+                        val latA = (tempPointA.x - tractorPivot.x) * cosH - (tempPointA.y - tractorPivot.y) * sinH
+                        val indX = (canvasWidth * 0.5f + (latA * pixelsPerMeter * 0.4f).toFloat()).coerceIn(140f, canvasWidth - 140f)
+                        val anchorPos = Offset(indX, safeBottomY)
+                        drawLine(Color(0x7300E5FF), anchorPos, tractorScreenPos, strokeWidth = 11.0f, cap = StrokeCap.Round)
+                        drawLine(Color(0xFF00E5FF), anchorPos, tractorScreenPos, strokeWidth = 4.8f, cap = StrokeCap.Round)
+                        drawCircle(Color(0xFF00E5FF).copy(alpha = pulseAlpha * 0.45f), 18.dp.toPx() * pulseScale, anchorPos)
+                        drawCircle(Color(0xFF00E5FF), 8.dp.toPx(), anchorPos)
+                    }
+
+                    val tractorIconCenter = Offset(tractorScreenPos.x, tractorScreenPos.y - 68.dp.toPx())
+                    drawLine(Color(0xFF00E5FF), tractorIconCenter, tractorScreenPos, strokeWidth = 3.0f, cap = StrokeCap.Round)
+                    drawCircle(Color(0xFF00E5FF).copy(alpha = pulseAlpha * 0.40f), 24.dp.toPx() * pulseScale, tractorIconCenter)
+                    drawCircle(Color(0xFF00E5FF), 17.dp.toPx(), tractorIconCenter)
+                    drawCircle(Color(0xFF0F172A), 13.dp.toPx(), tractorIconCenter)
+                    textPaint.color = android.graphics.Color.CYAN
+                    textPaint.textSize = 32f
+                    drawContext.canvas.nativeCanvas.drawText("A", tractorIconCenter.x, tractorIconCenter.y + 6.dp.toPx(), textPaint)
+
+                    val badgeText = String.format(Locale.US, "A-B TRACKING • %.1f m (%.0f ft) | %03.0f°", distAtoTractor, distFt, bearingDeg)
+                    textPaint.textSize = 18f
+                    val textW = textPaint.measureText(badgeText)
+                    val badgeTop = tractorIconCenter.y - 34.dp.toPx()
+                    drawRoundRect(Color(0xF50F172A), Offset(tractorIconCenter.x - textW * 0.5f - 14f, badgeTop - 16f), Size(textW + 28f, 34f), CornerRadius(12f, 12f))
+                    drawRoundRect(Color(0xFF00E5FF), Offset(tractorIconCenter.x - textW * 0.5f - 14f, badgeTop - 16f), Size(textW + 28f, 34f), CornerRadius(12f, 12f), style = scratch.strokeMedium)
+                    textPaint.color = android.graphics.Color.WHITE
+                    drawContext.canvas.nativeCanvas.drawText(badgeText, tractorIconCenter.x, badgeTop + 7f, textPaint)
+                }
+
             } else {
-                // --- 2D OVERHEAD MODES (BIRD EYE 2D, NORTH UP, FREE PAN) ---
+                // =========================================================================
+                // --- 2D OVERHEAD TOP-DOWN MODES (BIRD EYE 2D, NORTH UP, FREE PAN) ---
+                // =========================================================================
                 val isHeadUp = (cameraViewMode == CameraViewMode.BIRD_EYE_2D)
-                val centerScreen = Offset(canvasWidth / 2f + panOffset.x, canvasHeight / 2f + panOffset.y)
+                val tractorOffsetY = if (isHeadUp) canvasHeight * 0.68f else (canvasHeight * 0.5f)
+                val centerScreen = Offset(canvasWidth * 0.5f + panOffset.x, tractorOffsetY + panOffset.y)
                 val canvasRotation = if (isHeadUp) -headingDeg.toFloat() else 0f
+
+                drawRect(color = fieldBgColor)
 
                 withTransform({
                     rotate(degrees = canvasRotation, pivot = centerScreen)
                 }) {
-                    fun worldToScreen(worldPoint: Vec2): Offset {
-                        val dx = (worldPoint.x - tractorPivot.x).toFloat() * pixelsPerMeter
-                        val dy = (worldPoint.y - tractorPivot.y).toFloat() * pixelsPerMeter
-                        return Offset(centerScreen.x + dx, centerScreen.y - dy)
+                    fun worldToScreenX(wx: Double): Float = centerScreen.x + ((wx - tractorPivot.x).toFloat() * pixelsPerMeter)
+                    fun worldToScreenY(wy: Double): Float = centerScreen.y - ((wy - tractorPivot.y).toFloat() * pixelsPerMeter)
+                    fun worldToScreen(worldPoint: Vec2): Offset = Offset(worldToScreenX(worldPoint.x), worldToScreenY(worldPoint.y))
+
+                    if (showSatelliteOverlay) {
+                        drawSatelliteTileLayer(anchorScreen = centerScreen, tileAlpha = 1.0f)
                     }
 
-                    // --- TOPOGRAPHICAL & SATELLITE BASEMAP TILES (ESRI TOPO / USGS TOPO / OPENTOPO) ---
-                    if (showSatelliteOverlay && vehicleState.geoPosition.latitude != 0.0) {
-                        val z = tileRepo.getZoomForPixelsPerMeter(pixelsPerMeter, vehicleState.geoPosition.latitude, satelliteMapProvider)
-                        val centerTile = tileRepo.geoToTile(vehicleState.geoPosition.latitude, vehicleState.geoPosition.longitude, z)
-                        for (dx in -2..2) {
-                            for (dy in -2..2) {
-                                val tile = TileCoord(z, centerTile.x + dx, centerTile.y + dy)
-                                val cachedImage = tileRepo.getCachedTile(tile, satelliteMapProvider)
-                                val nwGeo = tileRepo.tileToGeoNW(tile)
-                                val seGeo = tileRepo.tileToGeoSE(tile)
-                                val nwLocal = GeoUtils.geoToLocalMeters(nwGeo, currentOriginGeo)
-                                val seLocal = GeoUtils.geoToLocalMeters(seGeo, currentOriginGeo)
-
-                                val nwScreen = worldToScreen(nwLocal)
-                                val seScreen = worldToScreen(seLocal)
-
-                                val tileLeft = min(nwScreen.x, seScreen.x)
-                                val tileTop = min(nwScreen.y, seScreen.y)
-                                val tileWidth = abs(seScreen.x - nwScreen.x)
-                                val tileHeight = abs(seScreen.y - nwScreen.y)
-
-                                if (tileWidth > 1f && tileHeight > 1f) {
-                                    if (cachedImage != null) {
-                                        drawImage(
-                                            image = cachedImage,
-                                            dstOffset = androidx.compose.ui.unit.IntOffset(tileLeft.roundToInt(), tileTop.roundToInt()),
-                                            dstSize = androidx.compose.ui.unit.IntSize(tileWidth.roundToInt(), tileHeight.roundToInt()),
-                                            filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
-                                            alpha = 0.95f
-                                        )
-                                    } else {
-                                        // Parent tile fallback at z-1: prevents blank screen while high-res tile downloads
-                                        val parentCoord = TileCoord(z - 1, tile.x shr 1, tile.y shr 1)
-                                        val parentImg = tileRepo.getCachedTile(parentCoord, satelliteMapProvider)
-                                        if (parentImg != null) {
-                                            val qx = (tile.x and 1) * 128
-                                            val qy = (tile.y and 1) * 128
-                                            drawImage(
-                                                image = parentImg,
-                                                srcOffset = androidx.compose.ui.unit.IntOffset(qx, qy),
-                                                srcSize = androidx.compose.ui.unit.IntSize(128, 128),
-                                                dstOffset = androidx.compose.ui.unit.IntOffset(tileLeft.roundToInt(), tileTop.roundToInt()),
-                                                dstSize = androidx.compose.ui.unit.IntSize(tileWidth.roundToInt(), tileHeight.roundToInt()),
-                                                filterQuality = androidx.compose.ui.graphics.FilterQuality.Medium,
-                                                alpha = 0.85f
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // --- 2D FIELD GRID & PLSS TOWNSHIP SECTION LINES (CLEAN, 120 FPS OPTIMIZED) ---
+                    // 1. 2D Field Grid & Visible World Bounds (for 100+ acre viewport culling)
                     val screenDiagPx = sqrt((canvasWidth * canvasWidth + canvasHeight * canvasHeight).toDouble())
-                    val viewExtentM = ((screenDiagPx / 2.0 + max(abs(panOffset.x.toDouble()), abs(panOffset.y.toDouble()))) / pixelsPerMeter.toDouble()) + 40.0
+                    val viewExtentM = ((screenDiagPx * 0.5 + max(abs(panOffset.x.toDouble()), abs(panOffset.y.toDouble()))) / pixelsPerMeter.toDouble()) + 35.0
+                    val visMinX = tractorPivot.x - viewExtentM
+                    val visMaxX = tractorPivot.x + viewExtentM
+                    val visMinY = tractorPivot.y - viewExtentM
+                    val visMaxY = tractorPivot.y + viewExtentM
 
-                    // Clean, well-spaced grid intervals (max 20-30 lines across screen)
-                    val (minorStepM, majorStepM) = when {
-                        pixelsPerMeter >= 6.0f -> Pair(10.0, 50.0)
-                        pixelsPerMeter >= 2.5f -> Pair(20.0, 100.0)
-                        pixelsPerMeter >= 0.8f -> Pair(50.0, 250.0)
-                        else -> Pair(100.0, 500.0)
-                    }
-
-                    val startX = floor((tractorPivot.x - viewExtentM) / minorStepM) * minorStepM
-                    val endX = ceil((tractorPivot.x + viewExtentM) / minorStepM) * minorStepM
-                    val startY = floor((tractorPivot.y - viewExtentM) / minorStepM) * minorStepM
-                    val endY = ceil((tractorPivot.y + viewExtentM) / minorStepM) * minorStepM
+                    val gridStepM = 20.0
+                    val startX = floor(visMinX / gridStepM) * gridStepM
+                    val endX = ceil(visMaxX / gridStepM) * gridStepM
+                    val startY = floor(visMinY / gridStepM) * gridStepM
+                    val endY = ceil(visMaxY / gridStepM) * gridStepM
+                    val gridAlpha = if (isDaylight) 0.42f else 0.32f
 
                     var currX = startX
                     while (currX <= endX) {
-                        val p1 = worldToScreen(Vec2(currX, startY))
-                        val p2 = worldToScreen(Vec2(currX, endY))
-                        val isMajor = abs(currX % majorStepM) < (minorStepM * 0.4)
-                        val lineAlpha = if (isMajor) 0.55f else 0.18f
-                        drawLine(
-                            color = gridLineColor.copy(alpha = lineAlpha),
-                            start = p1,
-                            end = p2,
-                            strokeWidth = if (isMajor) 1.5f else 0.8f
-                        )
-                        currX += minorStepM
+                        val sx = worldToScreenX(currX)
+                        drawLine(gridLineColor.copy(alpha = gridAlpha), Offset(sx, worldToScreenY(startY)), Offset(sx, worldToScreenY(endY)), strokeWidth = 1f)
+                        currX += gridStepM
                     }
-
                     var currY = startY
                     while (currY <= endY) {
-                        val p1 = worldToScreen(Vec2(startX, currY))
-                        val p2 = worldToScreen(Vec2(endX, currY))
-                        val isMajor = abs(currY % majorStepM) < (minorStepM * 0.4)
-                        val lineAlpha = if (isMajor) 0.55f else 0.18f
-                        drawLine(
-                            color = gridLineColor.copy(alpha = lineAlpha),
-                            start = p1,
-                            end = p2,
-                            strokeWidth = if (isMajor) 1.5f else 0.8f
-                        )
-                        currY += minorStepM
+                        val sy = worldToScreenY(currY)
+                        drawLine(gridLineColor.copy(alpha = gridAlpha), Offset(worldToScreenX(startX), sy), Offset(worldToScreenX(endX), sy), strokeWidth = 1f)
+                        currY += gridStepM
                     }
 
-                    // --- 0.5 MILE × 0.5 MILE (160 ACRE) TOPOGRAPHIC DEM MAP LAYER (REAL-TIME CONTOURS & DEM) ---
-                    if (showTopographyMap && terrainSquare != null) {
-                        // 1. Draw 0.5 mi × 0.5 mi Quarter Section Boundary Box
-                        val nwScreen = worldToScreen(Vec2(terrainSquare.minX, terrainSquare.maxY))
-                        val neScreen = worldToScreen(Vec2(terrainSquare.maxX, terrainSquare.maxY))
-                        val seScreen = worldToScreen(Vec2(terrainSquare.maxX, terrainSquare.minY))
-                        val swScreen = worldToScreen(Vec2(terrainSquare.minX, terrainSquare.minY))
+                    // 2. 2D Topographic Contours (Batched into 2 reusable Paths with viewport culling)
+                    if (showTopographyMap && liveTerrainSquare != null) {
+                        scratch.scratchPath.reset()
+                        scratch.scratchPath.moveTo(worldToScreenX(liveTerrainSquare.minX), worldToScreenY(liveTerrainSquare.maxY))
+                        scratch.scratchPath.lineTo(worldToScreenX(liveTerrainSquare.maxX), worldToScreenY(liveTerrainSquare.maxY))
+                        scratch.scratchPath.lineTo(worldToScreenX(liveTerrainSquare.maxX), worldToScreenY(liveTerrainSquare.minY))
+                        scratch.scratchPath.lineTo(worldToScreenX(liveTerrainSquare.minX), worldToScreenY(liveTerrainSquare.minY))
+                        scratch.scratchPath.close()
+                        drawPath(path = scratch.scratchPath, color = if (isDaylight) Color(0xAA0369A1) else Color(0xB300E5FF), style = scratch.strokeTopoBox)
 
-                        val topoBoxPath = Path().apply {
-                            moveTo(nwScreen.x, nwScreen.y)
-                            lineTo(neScreen.x, neScreen.y)
-                            lineTo(seScreen.x, seScreen.y)
-                            lineTo(swScreen.x, swScreen.y)
-                            close()
-                        }
-                        // Quarter section perimeter outline (cyan dashed line)
-                        drawPath(
-                            path = topoBoxPath,
-                            color = Color(0xFF00E5FF).copy(alpha = 0.75f),
-                            style = Stroke(
-                                width = 2.2f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 8f), 0f)
-                            )
-                        )
-
-                        // 2. Draw all real-time Topographic Contours (5' intervals generated from DEM)
-                        for (contour in terrainSquare.contours) {
-                            if (contour.points.size < 2) continue
-                            val isIndex = contour.isIndexContour
-                            val strokeW = if (isIndex) 2.2f else 1.1f
-                            val contourColor = if (isIndex) {
-                                if (isNightMode) Color(0xFFFFD54F).copy(alpha = 0.85f) else Color(0xFFD84315).copy(alpha = 0.85f)
-                            } else {
-                                if (isNightMode) Color(0xFFA5D6A7).copy(alpha = 0.5f) else Color(0xFF8D6E63).copy(alpha = 0.45f)
-                            }
-
-                            for (i in 0 until contour.points.size - 1) {
-                                val sp1 = worldToScreen(contour.points[i])
-                                val sp2 = worldToScreen(contour.points[i + 1])
-                                drawLine(
-                                    color = contourColor,
-                                    start = sp1,
-                                    end = sp2,
-                                    strokeWidth = strokeW,
-                                    pathEffect = if (isIndex) null else PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                                )
+                        scratch.indexContourPath.reset()
+                        scratch.minorContourPath.reset()
+                        val contours = liveTerrainSquare.contours
+                        for (ci in contours.indices) {
+                            val c = contours[ci]
+                            val pts = c.points
+                            if (pts.size < 2) continue
+                            val target = if (c.isIndexContour) scratch.indexContourPath else scratch.minorContourPath
+                            for (i in 0 until pts.size - 1) {
+                                val a = pts[i]; val b = pts[i + 1]
+                                if ((a.x < visMinX && b.x < visMinX) || (a.x > visMaxX && b.x > visMaxX) ||
+                                    (a.y < visMinY && b.y < visMinY) || (a.y > visMaxY && b.y > visMaxY)) continue
+                                target.moveTo(worldToScreenX(a.x), worldToScreenY(a.y))
+                                target.lineTo(worldToScreenX(b.x), worldToScreenY(b.y))
                             }
                         }
+                        drawPath(path = scratch.minorContourPath, color = minorContourColor, style = scratch.strokeMinorContour)
+                        drawPath(path = scratch.indexContourPath, color = indexContourColor, style = scratch.strokeIndexContour)
                     }
 
-                    // --- RTK BASE STATION (CONFIGURABLE LOCATION & SURVEY POINT) ---
-                    if (rtkBaseConfig.isEnabled) {
-                        val rtkBasePos = Vec2(rtkBaseConfig.relativeX, rtkBaseConfig.relativeY)
-                        val rtkScreenPos = worldToScreen(rtkBasePos)
-
-                        // RTK Radio Broadcast Waves (Concentric pulsing circles)
-                        drawCircle(
-                            color = Color(0x2200E5FF),
-                            radius = 28.dp.toPx(),
-                            center = rtkScreenPos
-                        )
-                        drawCircle(
-                            color = Color(0x4400E5FF),
-                            radius = 18.dp.toPx(),
-                            center = rtkScreenPos,
-                            style = Stroke(width = 1.5f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f), 0f))
-                        )
-                        drawCircle(
-                            color = Color(0x8800E5FF),
-                            radius = 9.dp.toPx(),
-                            center = rtkScreenPos,
-                            style = Stroke(width = 2f)
-                        )
-
-                        // RTK Base Station Tower Icon (Truss Triangle + Mast)
-                        reusableTowerPath.reset()
-                        reusableTowerPath.moveTo(rtkScreenPos.x, rtkScreenPos.y - 12.dp.toPx()) // Top Antenna
-                        reusableTowerPath.lineTo(rtkScreenPos.x - 7.dp.toPx(), rtkScreenPos.y + 6.dp.toPx()) // Left Leg
-                        reusableTowerPath.lineTo(rtkScreenPos.x + 7.dp.toPx(), rtkScreenPos.y + 6.dp.toPx()) // Right Leg
-                        reusableTowerPath.close()
-                        drawPath(
-                            path = reusableTowerPath,
-                            color = Color(0xFF00E5FF),
-                            style = Fill
-                        )
-                        drawCircle(
-                            color = Color(0xFFFFD54F),
-                            radius = 3.dp.toPx(),
-                            center = Offset(rtkScreenPos.x, rtkScreenPos.y - 12.dp.toPx())
-                        )
-
-                        // Baseline Vector connecting Tractor to RTK Base Station
-                        drawLine(
-                            color = Color(0x6600E5FF),
-                            start = rtkScreenPos,
-                            end = worldToScreen(tractorPivot),
-                            strokeWidth = 1.2f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                        )
-                    }
-
-                    // 1. Field Boundary Polygon
-                    if (fieldBoundary.size >= 3) {
-                        reusableBoundaryPath.reset()
-                        val first = worldToScreen(fieldBoundary[0])
-                        reusableBoundaryPath.moveTo(first.x, first.y)
-                        for (i in 1 until fieldBoundary.size) {
-                            val pt = worldToScreen(fieldBoundary[i])
-                            reusableBoundaryPath.lineTo(pt.x, pt.y)
+                    // 3. 2D Applied Coverage Swaths (Chunked Viewport Culling + Single Batched Path)
+                    scratch.coverageBatchPath.reset()
+                    var lastSeg2D: AppliedSwathSegment? = null
+                    if (coverageChunkStore != null) {
+                        coverageChunkStore.forEachVisibleIn2D(visMinX, visMaxX, visMinY, visMaxY) { seg ->
+                            scratch.coverageBatchPath.moveTo(worldToScreenX(seg.leftStart.x), worldToScreenY(seg.leftStart.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.rightStart.x), worldToScreenY(seg.rightStart.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.rightEnd.x), worldToScreenY(seg.rightEnd.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.leftEnd.x), worldToScreenY(seg.leftEnd.y))
+                            scratch.coverageBatchPath.close()
                         }
-                        reusableBoundaryPath.close()
-                        drawPath(
-                            path = reusableBoundaryPath,
-                            color = Color(0x1800E676),
-                            style = Fill
-                        )
-                        drawPath(
-                            path = reusableBoundaryPath,
-                            color = if (isRecordingBoundary) Color(0xFFFF5252) else boundaryColor,
-                            style = Stroke(
-                                width = 2.5f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 8f), 0f)
-                            )
-                        )
-                    } else if (fieldBoundary.size >= 2) {
-                        for (i in 0 until fieldBoundary.size - 1) {
-                            drawLine(
-                                color = Color(0xFFFF5252),
-                                start = worldToScreen(fieldBoundary[i]),
-                                end = worldToScreen(fieldBoundary[i + 1]),
-                                strokeWidth = 3f
-                            )
+                        lastSeg2D = coverageChunkStore.lastSegment
+                    } else {
+                        for (i in appliedSegments.indices) {
+                            val seg = appliedSegments[i]
+                            if (seg.center.x + seg.radius < visMinX || seg.center.x - seg.radius > visMaxX ||
+                                seg.center.y + seg.radius < visMinY || seg.center.y - seg.radius > visMaxY) continue
+                            scratch.coverageBatchPath.moveTo(worldToScreenX(seg.leftStart.x), worldToScreenY(seg.leftStart.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.rightStart.x), worldToScreenY(seg.rightStart.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.rightEnd.x), worldToScreenY(seg.rightEnd.y))
+                            scratch.coverageBatchPath.lineTo(worldToScreenX(seg.leftEnd.x), worldToScreenY(seg.leftEnd.y))
+                            scratch.coverageBatchPath.close()
                         }
+                        lastSeg2D = appliedSegments.lastOrNull()
                     }
 
-                    // 2. Inner Headland Boundary
-                    if (headlandBoundary.size >= 3) {
-                        reusableHeadlandPath.reset()
-                        val first = worldToScreen(headlandBoundary[0])
-                        reusableHeadlandPath.moveTo(first.x, first.y)
-                        for (i in 1 until headlandBoundary.size) {
-                            val pt = worldToScreen(headlandBoundary[i])
-                            reusableHeadlandPath.lineTo(pt.x, pt.y)
-                        }
-                        reusableHeadlandPath.close()
-                        drawPath(
-                            path = reusableHeadlandPath,
-                            color = headlandColor,
-                            style = Stroke(
-                                width = 2.0f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f)
-                            )
-                        )
-                    }
-
-                    // 3. Infield Coverage Rendering (Smooth continuous paint ribbon)
-                    for (i in appliedSegments.indices) {
-                        val seg = appliedSegments[i]
-                        val dx = abs(seg.center.x - tractorPivot.x)
-                        val dy = abs(seg.center.y - tractorPivot.y)
-                        if (dx > viewExtentM || dy > viewExtentM) {
-                            continue
-                        }
-
-                        val p1 = worldToScreen(seg.leftStart)
-                        val p2 = worldToScreen(seg.rightStart)
-                        val p3 = worldToScreen(seg.rightEnd)
-                        val p4 = worldToScreen(seg.leftEnd)
-
-                        reusableSegPath.reset()
-                        reusableSegPath.moveTo(p1.x, p1.y)
-                        reusableSegPath.lineTo(p2.x, p2.y)
-                        reusableSegPath.lineTo(p3.x, p3.y)
-                        reusableSegPath.lineTo(p4.x, p4.y)
-                        reusableSegPath.close()
-
-                        drawPath(
-                            path = reusableSegPath,
-                            color = baseCoverageColor,
-                            style = Fill
-                        )
-                    }
-
-                    // Smooth Live Brush Head in 2D (Connects last segment directly to live toolbar in real time)
-                    val isWorking2D = vehicleState.isAutoSteerEngaged || implementConfig.isMasterActive
-                    if (isWorking2D && abs(vehicleState.speedKmh) > 0.3) {
-                        val headingRad = Math.toRadians(headingDeg)
-                        val fwd2D = Vec2(sin(headingRad), cos(headingRad))
+                    // Live brush bridge in 2D
+                    val isHitchLowered2D = threePointState == ThreePointState.LOWERED || threePointState == ThreePointState.FLOAT
+                    val isWorking2D = isHitchLowered2D && (liveVehicle.isAutoSteerEngaged || implementConfig.isMasterActive) && tempPointA == null
+                    if (isWorking2D && abs(liveVehicle.speedKmh) > 0.15 && lastSeg2D != null) {
+                        val fwd2D = Vec2(sinH, cosH)
                         val right2D = fwd2D.perpClockwise()
                         val toolbarDistM = vehicleConfig.hitchLength - implementConfig.offsetBehindTractor
                         val liveCenter2D = tractorPivot + (fwd2D * toolbarDistM)
                         val halfBoom2D = implementConfig.toolWidth * 0.5
                         val liveBoomLeft2D = liveCenter2D - (right2D * halfBoom2D)
                         val liveBoomRight2D = liveCenter2D + (right2D * halfBoom2D)
-
-                        val lastSeg2D = appliedSegments.lastOrNull()
-                        val startLeft2D = lastSeg2D?.leftEnd ?: liveBoomLeft2D
-                        val startRight2D = lastSeg2D?.rightEnd ?: liveBoomRight2D
-
-                        val p1 = worldToScreen(startLeft2D)
-                        val p2 = worldToScreen(startRight2D)
-                        val p3 = worldToScreen(liveBoomRight2D)
-                        val p4 = worldToScreen(liveBoomLeft2D)
-
-                        reusableSegPath.reset()
-                        reusableSegPath.moveTo(p1.x, p1.y)
-                        reusableSegPath.lineTo(p2.x, p2.y)
-                        reusableSegPath.lineTo(p3.x, p3.y)
-                        reusableSegPath.lineTo(p4.x, p4.y)
-                        reusableSegPath.close()
-
-                        drawPath(
-                            path = reusableSegPath,
-                            color = baseCoverageColor,
-                            style = Fill
-                        )
+                        scratch.coverageBatchPath.moveTo(worldToScreenX(lastSeg2D.leftEnd.x), worldToScreenY(lastSeg2D.leftEnd.y))
+                        scratch.coverageBatchPath.lineTo(worldToScreenX(lastSeg2D.rightEnd.x), worldToScreenY(lastSeg2D.rightEnd.y))
+                        scratch.coverageBatchPath.lineTo(worldToScreenX(liveBoomRight2D.x), worldToScreenY(liveBoomRight2D.y))
+                        scratch.coverageBatchPath.lineTo(worldToScreenX(liveBoomLeft2D.x), worldToScreenY(liveBoomLeft2D.y))
+                        scratch.coverageBatchPath.close()
                     }
 
-                    // 4. Guidance Swath Lines
-                    if (guidanceMode == GuidanceMode.CONTOUR_CURVE && currentCurveLine != null && currentCurveLine.points.size >= 2) {
-                        val curvePts = currentCurveLine.points
-                        val swathW = implementConfig.swathWidth
-                        val activeIdx = vehicleState.activeSwathIndex
+                    if (!scratch.coverageBatchPath.isEmpty) {
+                        drawPath(path = scratch.coverageBatchPath, color = baseCoverageColor)
+                        drawPath(path = scratch.coverageBatchPath, color = coverageBorderColor, style = scratch.strokeCoverageEdge)
+                    }
 
-                        // Render active and adjacent curved passes
-                        for (offset in -3..3) {
-                            val passIdx = activeIdx + offset
-                            val isTarget = (offset == 0)
-                            val passColor = if (isTarget) activeSwathColor else parallelSwathColor
-                            val strokeW = if (isTarget) 4.0f else 1.8f
+                    // Helper for 2D Surveyor Flagpole Marker (zero-alloc reusable scratchPath)
+                    fun draw2DSurveyorFlag(worldPos: Vec2, label: String, flagColor: Color) {
+                        val sp = worldToScreen(worldPos)
+                        drawCircle(color = flagColor.copy(alpha = pulseAlpha * 0.5f), radius = 16.dp.toPx() * pulseScale, center = sp)
+                        drawCircle(color = flagColor, radius = 8.dp.toPx(), center = sp)
+                        drawCircle(color = Color(0xFF0F172A), radius = 5.dp.toPx(), center = sp)
 
-                            for (i in 0 until curvePts.size - 1) {
-                                val p0 = curvePts[i]
-                                val p1 = curvePts[i + 1]
-                                val dir = (p1 - p0).normalized()
-                                val norm = dir.perpClockwise()
+                        val arm = 14.dp.toPx()
+                        drawLine(flagColor, Offset(sp.x - arm, sp.y), Offset(sp.x + arm, sp.y), strokeWidth = 2.0f)
+                        drawLine(flagColor, Offset(sp.x, sp.y - arm), Offset(sp.x, sp.y + arm), strokeWidth = 2.0f)
 
-                                val shift = norm * (passIdx * swathW)
-                                val sp0 = worldToScreen(p0 + shift)
-                                val sp1 = worldToScreen(p1 + shift)
+                        val poleHeight = 44.dp.toPx()
+                        val poleTop = Offset(sp.x, sp.y - poleHeight)
+                        drawLine(Color.White, sp, poleTop, strokeWidth = 3.0f, cap = StrokeCap.Round)
+                        drawLine(Color(0xFF0F172A), sp, poleTop, strokeWidth = 1.2f, cap = StrokeCap.Round)
 
-                                drawLine(
-                                    color = passColor,
-                                    start = sp0,
-                                    end = sp1,
-                                    strokeWidth = strokeW,
-                                    cap = StrokeCap.Round,
-                                    pathEffect = if (isTarget) null else PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
-                                )
+                        val flagW = 36.dp.toPx()
+                        val flagH = 23.dp.toPx()
+                        scratch.scratchPath.reset()
+                        scratch.scratchPath.moveTo(poleTop.x, poleTop.y)
+                        scratch.scratchPath.lineTo(poleTop.x + flagW, poleTop.y + flagH * 0.5f)
+                        scratch.scratchPath.lineTo(poleTop.x, poleTop.y + flagH)
+                        scratch.scratchPath.close()
+                        drawPath(path = scratch.scratchPath, color = flagColor)
+                        drawPath(path = scratch.scratchPath, color = Color.White, style = scratch.strokeMedium)
+
+                        val textOffsetXPx = 13.dp.toPx()
+                        val textOffsetYPx = 16.dp.toPx()
+                        withTransform({
+                            rotate(degrees = -canvasRotation, pivot = Offset(poleTop.x + textOffsetXPx, poleTop.y + flagH * 0.5f))
+                        }) {
+                            textPaint.color = android.graphics.Color.WHITE
+                            textPaint.textSize = 21f
+                            drawContext.canvas.nativeCanvas.drawText(label, poleTop.x + textOffsetXPx, poleTop.y + textOffsetYPx, textPaint)
+                        }
+                    }
+
+                    // 4. Point A Live Tracking in 2D
+                    if (tempPointA != null) {
+                        draw2DSurveyorFlag(tempPointA, "A", Color(0xFF00E5FF))
+                        val distA = tempPointA.distanceTo(tractorPivot)
+                        val distFt = distA * 3.28084
+                        val bearingDeg = (Math.toDegrees(atan2(tractorPivot.x - tempPointA.x, tractorPivot.y - tempPointA.y)) + 360.0) % 360.0
+                        val swathDir2D = if (distA >= 0.8) (tractorPivot - tempPointA).normalized() else Vec2(sinH, cosH)
+                        val swathNorm2D = Vec2(swathDir2D.y, -swathDir2D.x)
+                        val lineStart2D = tempPointA - (swathDir2D * 100.0)
+                        val lineEnd2D = tractorPivot + (swathDir2D * 1000.0)
+
+                        val spStart = worldToScreen(lineStart2D)
+                        val spEnd = worldToScreen(lineEnd2D)
+                        val spTractor = worldToScreen(tractorPivot)
+                        drawLine(Color(0x5900E5FF), spStart, spEnd, strokeWidth = 10.0f)
+                        drawLine(Color(0xFF00E5FF), spStart, spEnd, strokeWidth = 4.5f)
+
+                        if (liveAbTrail.size >= 2) {
+                            for (i in 0 until liveAbTrail.size - 1) {
+                                drawLine(Color(0xD900E5FF), worldToScreen(liveAbTrail[i]), worldToScreen(liveAbTrail[i + 1]), strokeWidth = 4.0f)
                             }
                         }
-                    } else if (currentABLine != null) {
+
+                        val halfW = implementConfig.toolWidth * 0.5
+                        drawLine(Color(0x8C38BDF8), worldToScreen(lineStart2D + (swathNorm2D * halfW)), worldToScreen(lineEnd2D + (swathNorm2D * halfW)), strokeWidth = 2.0f, pathEffect = scratch.dashCorridor)
+                        drawLine(Color(0x8C38BDF8), worldToScreen(lineStart2D - (swathNorm2D * halfW)), worldToScreen(lineEnd2D - (swathNorm2D * halfW)), strokeWidth = 2.0f, pathEffect = scratch.dashCorridor)
+
+                        for (passOffset in -4..4) {
+                            if (passOffset == 0) continue
+                            val pOffset = swathNorm2D * (passOffset * implementConfig.swathWidth)
+                            drawLine(Color(0x660284C7), worldToScreen(lineStart2D + pOffset), worldToScreen(lineEnd2D + pOffset), strokeWidth = 1.8f, pathEffect = scratch.dashParallel)
+                        }
+
+                        val tractorIconCenter2D = Offset(spTractor.x, spTractor.y - 46.dp.toPx())
+                        drawLine(Color(0xFF00E5FF), Offset(spTractor.x, spTractor.y - 30.dp.toPx()), spTractor, strokeWidth = 2.5f, cap = StrokeCap.Round)
+                        drawCircle(Color(0xFF00E5FF).copy(alpha = pulseAlpha * 0.35f), 22.dp.toPx() * pulseScale, tractorIconCenter2D)
+                        drawCircle(Color(0xFF00E5FF), 15.dp.toPx(), tractorIconCenter2D)
+                        drawCircle(Color(0xFF0F172A), 11.dp.toPx(), tractorIconCenter2D)
+
+                        withTransform({
+                            rotate(degrees = -canvasRotation, pivot = tractorIconCenter2D)
+                        }) {
+                            textPaint.color = android.graphics.Color.CYAN
+                            textPaint.textSize = 28f
+                            drawContext.canvas.nativeCanvas.drawText("A", tractorIconCenter2D.x, tractorIconCenter2D.y + 6.dp.toPx(), textPaint)
+
+                            val badgeText = String.format(Locale.US, "POINT A ACTIVE • %.1f m (%.0f ft) | %03.0f°", distA, distFt, bearingDeg)
+                            textPaint.textSize = 16f
+                            val textW = textPaint.measureText(badgeText)
+                            val badgeTop = tractorIconCenter2D.y - 28.dp.toPx()
+                            drawRoundRect(Color(0xEE0F172A), Offset(tractorIconCenter2D.x - textW * 0.5f - 12f, badgeTop - 12f), Size(textW + 24f, 30f), CornerRadius(8f, 8f))
+                            drawRoundRect(Color(0xFF00E5FF), Offset(tractorIconCenter2D.x - textW * 0.5f - 12f, badgeTop - 12f), Size(textW + 24f, 30f), CornerRadius(8f, 8f), style = scratch.strokeMedium)
+                            textPaint.color = android.graphics.Color.WHITE
+                            drawContext.canvas.nativeCanvas.drawText(badgeText, tractorIconCenter2D.x, badgeTop + 7f, textPaint)
+                        }
+                    }
+
+                    // 5. 2D AB Line Guidance & Parallel Passes (Sharpened Contrast Halo + Vivid Core)
+                    if (currentABLine != null) {
                         val swathW = implementConfig.swathWidth
-                        val activeIndex = vehicleState.activeSwathIndex
+                        val activeIdx = liveVehicle.activeSwathIndex
                         val lineDir = currentABLine.dirVector
                         val lineNormal = currentABLine.normalVector
-                        val lineLengthMeters = 500.0
+                        val lineLengthMeters = 2000.0
 
-                        for (passOffset in -6..6) {
-                            val passIndex = activeIndex + passOffset
+                        for (passOffset in -10..10) {
+                            val passIndex = activeIdx + passOffset
                             val swathOrigin = currentABLine.aLocal + (lineNormal * (passIndex * swathW))
-                            val pStart = swathOrigin - (lineDir * lineLengthMeters)
-                            val pEnd = swathOrigin + (lineDir * lineLengthMeters)
-
-                            val screenStart = worldToScreen(pStart)
-                            val screenEnd = worldToScreen(pEnd)
-
+                            val sp1 = worldToScreen(swathOrigin - (lineDir * lineLengthMeters))
+                            val sp2 = worldToScreen(swathOrigin + (lineDir * lineLengthMeters))
                             if (passOffset == 0) {
-                                // Active target pass: Glowing Neon Green Solid line
-                                drawLine(
-                                    color = activeSwathColor.copy(alpha = 0.25f),
-                                    start = screenStart,
-                                    end = screenEnd,
-                                    strokeWidth = 9.0f,
-                                    cap = StrokeCap.Round
-                                )
-                                drawLine(
-                                    color = activeSwathColor,
-                                    start = screenStart,
-                                    end = screenEnd,
-                                    strokeWidth = 3.8f,
-                                    cap = StrokeCap.Round
-                                )
+                                drawLine(color = activeSwathHaloColor, start = sp1, end = sp2, strokeWidth = 10.5f, cap = StrokeCap.Round)
+                                drawLine(color = activeSwathColor, start = sp1, end = sp2, strokeWidth = 5.0f, cap = StrokeCap.Round)
                             } else {
-                                // Parallel passes: Cyan dashed lines
-                                drawLine(
-                                    color = parallelSwathColor,
-                                    start = screenStart,
-                                    end = screenEnd,
-                                    strokeWidth = 1.8f,
-                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
-                                )
+                                drawLine(color = parallelSwathColor, start = sp1, end = sp2, strokeWidth = 2.2f, pathEffect = scratch.dashParallel)
                             }
                         }
+                        draw2DSurveyorFlag(currentABLine.aLocal, "A", Color(0xFF00E5FF))
+                        draw2DSurveyorFlag(currentABLine.bLocal, "B", Color(0xFFF59E0B))
                     }
 
-                    // Recording curve pass indicator
-                    if (recordingCurvePoints.size >= 2) {
-                        for (i in 0 until recordingCurvePoints.size - 1) {
-                            drawLine(
-                                color = Color(0xFFE040FB),
-                                start = worldToScreen(recordingCurvePoints[i]),
-                                end = worldToScreen(recordingCurvePoints[i + 1]),
-                                strokeWidth = 3f
-                            )
+                    // 5.5 2D Dashed Headland U-Turn Preview Arc
+                    if (liveUTurnPath.size >= 2) {
+                        scratch.uTurnPath.reset()
+                        scratch.uTurnPath.moveTo(worldToScreenX(liveUTurnPath[0].x), worldToScreenY(liveUTurnPath[0].y))
+                        for (i in 1 until liveUTurnPath.size) {
+                            scratch.uTurnPath.lineTo(worldToScreenX(liveUTurnPath[i].x), worldToScreenY(liveUTurnPath[i].y))
                         }
+                        drawPath(path = scratch.uTurnPath, color = uTurnHaloColor, style = scratch.strokeTurnHalo)
+                        drawPath(path = scratch.uTurnPath, color = uTurnArcColor, style = scratch.strokeTurnDash)
+                        val endPt = worldToScreen(liveUTurnPath.last())
+                        drawCircle(color = uTurnHaloColor, radius = 8f, center = endPt)
+                        drawCircle(color = uTurnArcColor, radius = 5f, center = endPt)
                     }
 
-                    // U-Turn Dubins Path Preview
-                    if (uTurnPath.size >= 2) {
-                        for (i in 0 until uTurnPath.size - 1) {
-                            drawLine(
-                                color = Color(0xFF00E5FF),
-                                start = worldToScreen(uTurnPath[i]),
-                                end = worldToScreen(uTurnPath[i + 1]),
-                                strokeWidth = 2.5f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
-                            )
+                    // 6. Field & Headland Boundaries (Single Batched Paths)
+                    if (fieldBoundary.size >= 2) {
+                        scratch.boundaryPath.reset()
+                        scratch.boundaryPath.moveTo(worldToScreenX(fieldBoundary[0].x), worldToScreenY(fieldBoundary[0].y))
+                        for (i in 1 until fieldBoundary.size) {
+                            scratch.boundaryPath.lineTo(worldToScreenX(fieldBoundary[i].x), worldToScreenY(fieldBoundary[i].y))
                         }
+                        scratch.boundaryPath.close()
+                        drawPath(path = scratch.boundaryPath, color = boundaryColor, style = scratch.strokeBoundary)
+                    }
+                    if (headlandBoundary.size >= 2) {
+                        scratch.headlandPath.reset()
+                        scratch.headlandPath.moveTo(worldToScreenX(headlandBoundary[0].x), worldToScreenY(headlandBoundary[0].y))
+                        for (i in 1 until headlandBoundary.size) {
+                            scratch.headlandPath.lineTo(worldToScreenX(headlandBoundary[i].x), worldToScreenY(headlandBoundary[i].y))
+                        }
+                        scratch.headlandPath.close()
+                        drawPath(path = scratch.headlandPath, color = headlandColor, style = scratch.strokeHeadland)
                     }
 
-                    // 4.5. Field Obstacles & Hazards (2D Top-Down View)
-                    for (obs in obstacles) {
-                        val screenPos = worldToScreen(obs.localPos)
-                        val radiusPx = (obs.radiusMeters * pixelsPerMeter).toFloat().coerceAtLeast(14f)
-
-                        // Translucent safety buffer halo
-                        drawCircle(
-                            color = obs.type.displayColor.copy(alpha = 0.22f),
-                            radius = radiusPx,
-                            center = screenPos
-                        )
-                        // Outer warning circle outline
-                        drawCircle(
-                            color = obs.type.displayColor.copy(alpha = 0.8f),
-                            radius = radiusPx,
-                            center = screenPos,
-                            style = Stroke(
-                                width = 2.0f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-                            )
-                        )
-                        // Center Solid Hazard Marker Pin
-                        drawCircle(
-                            color = obs.type.displayColor,
-                            radius = 6.dp.toPx(),
-                            center = screenPos
-                        )
-                        drawCircle(
-                            color = Color.Black,
-                            radius = 3.dp.toPx(),
-                            center = screenPos
-                        )
+                    // 7. Field Obstacles
+                    for (i in obstacles.indices) {
+                        val obs = obstacles[i]
+                        val sPos = worldToScreen(obs.localPos)
+                        val radPx = (obs.radiusMeters.toFloat() * pixelsPerMeter).coerceAtLeast(10f)
+                        drawCircle(color = obs.type.displayColor.copy(alpha = 0.25f), radius = radPx, center = sPos)
+                        drawCircle(color = obs.type.displayColor, radius = radPx, center = sPos, style = scratch.strokeMedium)
+                        drawCircle(color = obs.type.displayColor, radius = 6.dp.toPx(), center = sPos)
+                        drawCircle(color = Color.Black, radius = 3.dp.toPx(), center = sPos)
                     }
 
-                    // 5. Draw Tractor and Implement Model
-                    // In Head-Up mode (canvas rotated by -headingDeg), vehicleAngle (+headingDeg) aligns the tractor straight forward/up.
-                    // In North-Up mode (canvas unrotated 0°), vehicleAngle (+headingDeg) points the tractor in the exact direction of motion.
-                    val vehicleAngle = headingDeg.toFloat()
+                    // 8. 2D Tractor & Implement Model (Steered Front Wheels + 3-Point Hitch State)
+                    val vehicleAngle = if (isHeadUp) 0f else headingDeg.toFloat()
                     withTransform({
                         rotate(degrees = vehicleAngle, pivot = centerScreen)
                     }) {
-                        drawTractorVehicle(
-                            pixelsPerMeter = pixelsPerMeter,
+                        drawTractorIn2D(
                             center = centerScreen,
+                            pixelsPerMeter = pixelsPerMeter,
                             vehicleConfig = vehicleConfig,
                             implementConfig = implementConfig,
-                            actualSteerDeg = vehicleState.actualSteerAngleDeg,
-                            isAutoSteerEngaged = vehicleState.isAutoSteerEngaged,
-                            sectionStates = vehicleState.sectionStates,
-                            slidingHitchConfig = slidingHitchConfig,
-                            slidingHitchState = slidingHitchState
+                            actualSteerDeg = liveVehicle.actualSteerAngleDeg,
+                            isAutoSteerEngaged = liveVehicle.isAutoSteerEngaged,
+                            isMasterActive = implementConfig.isMasterActive,
+                            threePointState = threePointState,
+                            sectionStates = liveVehicle.sectionStates,
+                            themeMode = themeMode,
+                            scratch = scratch
                         )
                     }
                 }
@@ -1194,541 +1225,12 @@ fun GuidanceMapCanvas(
 
             // Compass Rose Overlay (Top-Right)
             drawCompass(
-                center = Offset(size.width - 45.dp.toPx(), 45.dp.toPx()),
+                center = Offset(size.width - 44.dp.toPx(), 44.dp.toPx()),
                 headingDeg = headingDeg,
-                isHeadUpMode = (cameraViewMode == CameraViewMode.CAB_3D || cameraViewMode == CameraViewMode.BIRD_EYE_2D)
+                isHeadUpMode = (cameraViewMode == CameraViewMode.CAB_3D || cameraViewMode == CameraViewMode.BIRD_EYE_2D),
+                themeMode = themeMode,
+                scratch = scratch
             )
         }
-
-        // Headland Turn Guidance Banner (Top-Center)
-        if (headlandTurnInfo.isApproachingHeadland && headlandTurnInfo.direction != TurnDirection.NONE) {
-            Surface(
-                color = Color(0xEEFF9800),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .padding(top = 10.dp)
-                    .align(Alignment.TopCenter)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = if (headlandTurnInfo.direction == TurnDirection.TURN_LEFT) "⮜ TURN LEFT" else "TURN RIGHT ⮞",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 14.sp
-                    )
-                    Text(
-                        text = "• Target Pass #${headlandTurnInfo.targetSwathIndex} in ${String.format(java.util.Locale.US, "%.0f", headlandTurnInfo.distanceToTurnMeters)}m",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
-                }
-            }
-        }
-
-        // Obstacle Proximity Warning Banner (Below Top Status)
-        activeObstacleAlert?.let { obs ->
-            Surface(
-                color = Color(0xFFD50000),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .padding(top = if (headlandTurnInfo.isApproachingHeadland) 48.dp else 10.dp)
-                    .align(Alignment.TopCenter)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "⚠ HAZARD NEARBY: ${obs.name.uppercase()}",
-                        color = Color.White,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 13.sp
-                    )
-                    Text(
-                        text = "(${String.format(java.util.Locale.US, "%.1f", obs.radiusMeters)}m zone)",
-                        color = Color(0xFFFFD54F),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun DrawScope.drawTractorVehicle(
-    pixelsPerMeter: Float,
-    center: Offset,
-    vehicleConfig: VehicleConfig,
-    implementConfig: ImplementConfig,
-    actualSteerDeg: Double,
-    isAutoSteerEngaged: Boolean,
-    sectionStates: List<Boolean>,
-    slidingHitchConfig: SlidingHitchConfig = SlidingHitchConfig(),
-    slidingHitchState: SlidingHitchState = SlidingHitchState()
-) {
-    val wheelbasePx = (vehicleConfig.wheelbase * pixelsPerMeter).toFloat()
-    val halfTrackPx = (vehicleConfig.trackWidth * 0.5 * pixelsPerMeter).toFloat()
-    val tireWidthPx = (0.52 * pixelsPerMeter).toFloat().coerceAtLeast(5f)
-    val tireLengthPx = (1.25 * pixelsPerMeter).toFloat().coerceAtLeast(10f)
-    val dualSpacingPx = (0.65 * pixelsPerMeter).toFloat().coerceAtLeast(7f)
-
-    val rearTireColor = Color(0xFF212121)
-    val rimColor = Color(0xFFECEFF1)
-
-    // Left Dual Rear Wheels (Inner & Outer)
-    val rearLeftInner = Offset(center.x - halfTrackPx, center.y)
-    val rearLeftOuter = Offset(center.x - halfTrackPx - dualSpacingPx, center.y)
-    drawRoundRect(
-        color = rearTireColor,
-        topLeft = Offset(rearLeftInner.x - tireWidthPx / 2f, rearLeftInner.y - tireLengthPx / 2f),
-        size = Size(tireWidthPx, tireLengthPx),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-    drawRoundRect(
-        color = rearTireColor,
-        topLeft = Offset(rearLeftOuter.x - tireWidthPx / 2f, rearLeftOuter.y - tireLengthPx / 2f),
-        size = Size(tireWidthPx, tireLengthPx),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-    // Dual wheel axle hub spacer
-    drawLine(
-        color = Color(0xFF37474F),
-        start = rearLeftOuter,
-        end = rearLeftInner,
-        strokeWidth = 3f
-    )
-
-    // Right Dual Rear Wheels (Inner & Outer)
-    val rearRightInner = Offset(center.x + halfTrackPx, center.y)
-    val rearRightOuter = Offset(center.x + halfTrackPx + dualSpacingPx, center.y)
-    drawRoundRect(
-        color = rearTireColor,
-        topLeft = Offset(rearRightInner.x - tireWidthPx / 2f, rearRightInner.y - tireLengthPx / 2f),
-        size = Size(tireWidthPx, tireLengthPx),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-    drawRoundRect(
-        color = rearTireColor,
-        topLeft = Offset(rearRightOuter.x - tireWidthPx / 2f, rearRightOuter.y - tireLengthPx / 2f),
-        size = Size(tireWidthPx, tireLengthPx),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-    drawLine(
-        color = Color(0xFF37474F),
-        start = rearRightInner,
-        end = rearRightOuter,
-        strokeWidth = 3f
-    )
-
-    // Rear Heavy Cast Axle
-    drawLine(
-        color = Color(0xFF1B2428),
-        start = rearLeftInner,
-        end = rearRightInner,
-        strokeWidth = 4.5f
-    )
-
-    // Front Axle & Steered Wheels
-    val frontAxleCenter = Offset(center.x, center.y - wheelbasePx)
-    val frontLeft = Offset(frontAxleCenter.x - halfTrackPx * 0.9f, frontAxleCenter.y)
-    val frontRight = Offset(frontAxleCenter.x + halfTrackPx * 0.9f, frontAxleCenter.y)
-    val frontTireWidth = tireWidthPx * 0.85f
-    val frontTireLength = tireLengthPx * 0.82f
-
-    drawLine(
-        color = Color(0xFF263238),
-        start = frontLeft,
-        end = frontRight,
-        strokeWidth = 3.5f
-    )
-
-    // Steered Front Left Tire
-    withTransform({
-        rotate(degrees = actualSteerDeg.toFloat(), pivot = frontLeft)
-    }) {
-        drawRoundRect(
-            color = if (isAutoSteerEngaged) Color(0xFF2E7D32) else rearTireColor,
-            topLeft = Offset(frontLeft.x - frontTireWidth / 2f, frontLeft.y - frontTireLength / 2f),
-            size = Size(frontTireWidth, frontTireLength),
-            cornerRadius = CornerRadius(2f, 2f)
-        )
-    }
-
-    // Steered Front Right Tire
-    withTransform({
-        rotate(degrees = actualSteerDeg.toFloat(), pivot = frontRight)
-    }) {
-        drawRoundRect(
-            color = if (isAutoSteerEngaged) Color(0xFF2E7D32) else rearTireColor,
-            topLeft = Offset(frontRight.x - frontTireWidth / 2f, frontRight.y - frontTireLength / 2f),
-            size = Size(frontTireWidth, frontTireLength),
-            cornerRadius = CornerRadius(2f, 2f)
-        )
-    }
-
-    // Trajectory Motion Vector Lookahead (Front Axle Heading & Steer Vector)
-    val vectorLookaheadPx = (wheelbasePx * 1.5f).coerceAtLeast(35f)
-    withTransform({
-        rotate(degrees = actualSteerDeg.toFloat() * 0.75f, pivot = frontAxleCenter)
-    }) {
-        val vectorEnd = Offset(frontAxleCenter.x, frontAxleCenter.y - vectorLookaheadPx)
-        drawLine(
-            color = if (isAutoSteerEngaged) Color(0xFF00E676) else Color(0xFFFFD54F),
-            start = frontAxleCenter,
-            end = vectorEnd,
-            strokeWidth = 2.5f,
-            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
-        )
-        val arrowPath = Path().apply {
-            moveTo(vectorEnd.x, vectorEnd.y - 6f)
-            lineTo(vectorEnd.x - 5f, vectorEnd.y + 4f)
-            lineTo(vectorEnd.x + 5f, vectorEnd.y + 4f)
-            close()
-        }
-        drawPath(
-            path = arrowPath,
-            color = if (isAutoSteerEngaged) Color(0xFF00E676) else Color(0xFFFFD54F),
-            style = Fill
-        )
-    }
-
-    // New Holland 8870 Genesis Long Hood & Cab
-    val hoodWidth = halfTrackPx * 0.76f
-    val hoodLength = wheelbasePx * 0.94f
-    // New Holland signature Vibrant Ford Blue (High contrast): Color(0xFF0066B3)
-    val nhBlue = Color(0xFF0066B3)
-    val nhYellow = Color(0xFFFFD100)
-    val hoodColor = if (isAutoSteerEngaged) Color(0xFF00C853) else nhBlue
-
-    // Main Engine Hood
-    drawRoundRect(
-        color = hoodColor,
-        topLeft = Offset(center.x - hoodWidth / 2f, center.y - hoodLength),
-        size = Size(hoodWidth, hoodLength),
-        cornerRadius = CornerRadius(4f, 4f)
-    )
-
-    // New Holland White & Yellow Accent Striping along hood
-    drawLine(
-        color = Color.White,
-        start = Offset(center.x - (hoodWidth * 0.42f), center.y - (hoodLength * 0.85f)),
-        end = Offset(center.x - (hoodWidth * 0.42f), center.y - (hoodLength * 0.15f)),
-        strokeWidth = 2.0f
-    )
-    drawLine(
-        color = Color.White,
-        start = Offset(center.x + (hoodWidth * 0.42f), center.y - (hoodLength * 0.85f)),
-        end = Offset(center.x + (hoodWidth * 0.42f), center.y - (hoodLength * 0.15f)),
-        strokeWidth = 2.0f
-    )
-
-    // Genesis Black Front Radiator Grille & Dual Headlights
-    drawRoundRect(
-        color = Color(0xFF1E2124),
-        topLeft = Offset(center.x - (hoodWidth * 0.45f), center.y - hoodLength - 3f),
-        size = Size(hoodWidth * 0.9f, 6f),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-    // Headlights
-    drawCircle(color = Color(0xFFFFF9C4), radius = 2.5f, center = Offset(center.x - (hoodWidth * 0.35f), center.y - hoodLength))
-    drawCircle(color = Color(0xFFFFF9C4), radius = 2.5f, center = Offset(center.x + (hoodWidth * 0.35f), center.y - hoodLength))
-
-    // Genesis Deluxe Cab Glass & Roof
-    val cabWidth = hoodWidth * 1.25f
-    val cabLength = hoodLength * 0.44f
-    val cabY = center.y - cabLength - (wheelbasePx * 0.08f)
-
-    // Tinted Glass
-    drawRoundRect(
-        color = Color(0xFF81D4FA).copy(alpha = 0.85f),
-        topLeft = Offset(center.x - cabWidth / 2f, cabY),
-        size = Size(cabWidth, cabLength),
-        cornerRadius = CornerRadius(3f, 3f)
-    )
-
-    // White Genesis Roof Cap with Blue Sunshade Trim
-    drawRoundRect(
-        color = Color(0xFFFAFAFA),
-        topLeft = Offset(center.x - (cabWidth * 0.48f), cabY + 2f),
-        size = Size(cabWidth * 0.96f, cabLength * 0.52f),
-        cornerRadius = CornerRadius(3f, 3f)
-    )
-    drawRoundRect(
-        color = nhBlue,
-        topLeft = Offset(center.x - (cabWidth * 0.45f), cabY + (cabLength * 0.45f)),
-        size = Size(cabWidth * 0.9f, 2.5f),
-        cornerRadius = CornerRadius(1f, 1f)
-    )
-
-    // Yellow Wheel Hub Centers (New Holland / Ag spec)
-    drawCircle(color = nhYellow, radius = 3.5f, center = rearLeftInner)
-    drawCircle(color = nhYellow, radius = 3.5f, center = rearRightInner)
-
-    // GPS/GNSS Dual Antenna Target Dot
-    val antennaOffsetPx = (vehicleConfig.antennaPivotOffset * pixelsPerMeter).toFloat()
-    val antennaPos = Offset(center.x, center.y - antennaOffsetPx)
-    drawCircle(
-        color = Color(0xFFFFEA00),
-        radius = 5.0f,
-        center = antennaPos
-    )
-    drawCircle(
-        color = Color(0xFF212121),
-        radius = 5.0f,
-        center = antennaPos,
-        style = Stroke(width = 1.2f)
-    )
-
-    // --- IMPLEMENT HITCH & TOOLBAR GEOMETRY ---
-    val hitchLengthPx = (-vehicleConfig.hitchLength * pixelsPerMeter).toFloat()
-    val hitchY = center.y + hitchLengthPx
-    val offsetPx = (implementConfig.offsetBehindTractor * pixelsPerMeter).toFloat()
-    val boomY = hitchY + offsetPx
-
-    // Lateral hitch shift from active sliding hitch controller
-    val isHitchEnabled = slidingHitchConfig.isEnabled
-    val hitchShiftPx = if (isHitchEnabled) {
-        ((slidingHitchState.currentHitchShiftCm / 100.0) * pixelsPerMeter).toFloat()
-    } else {
-        0f
-    }
-    val toolbarCenterX = center.x + hitchShiftPx
-
-    if (implementConfig.implementType == ImplementType.THREE_POINT_MOUNTED) {
-        // --- 3-POINT HITCH MOUNTED TOOLBAR ---
-        // 1. Lower Draft Links
-        val leftLiftArmStart = Offset(center.x - halfTrackPx * 0.35f, center.y)
-        val rightLiftArmStart = Offset(center.x + halfTrackPx * 0.35f, center.y)
-        val leftQuickHitchPoint = Offset(center.x - halfTrackPx * 0.45f, hitchY)
-        val rightQuickHitchPoint = Offset(center.x + halfTrackPx * 0.45f, hitchY)
-
-        drawLine(color = Color(0xFF37474F), start = leftLiftArmStart, end = leftQuickHitchPoint, strokeWidth = 4f)
-        drawLine(color = Color(0xFF37474F), start = rightLiftArmStart, end = rightQuickHitchPoint, strokeWidth = 4f)
-
-        // 2. Top Link (Center cylinder)
-        drawLine(
-            color = Color(0xFF455A64),
-            start = Offset(center.x, center.y - (wheelbasePx * 0.12f)),
-            end = Offset(center.x, hitchY),
-            strokeWidth = 3f
-        )
-
-        // 3. Category 3 Quick-Hitch Frame Crossbar
-        drawLine(
-            color = Color(0xFF263238),
-            start = leftQuickHitchPoint,
-            end = rightQuickHitchPoint,
-            strokeWidth = 6f,
-            cap = StrokeCap.Square
-        )
-
-        // 4. Sliding Hitch Hydraulic Carriage & Slide Rails
-        if (isHitchEnabled) {
-            val slideHalfPx = (halfTrackPx * 0.4f).coerceAtLeast(16f)
-            // Heavy Dual Slide Rails
-            drawLine(
-                color = Color(0xFF1E282C),
-                start = Offset(center.x - slideHalfPx, hitchY + 2f),
-                end = Offset(center.x + slideHalfPx, hitchY + 2f),
-                strokeWidth = 5f
-            )
-            drawLine(
-                color = Color(0xFF1E282C),
-                start = Offset(center.x - slideHalfPx, hitchY + 6f),
-                end = Offset(center.x + slideHalfPx, hitchY + 6f),
-                strokeWidth = 5f
-            )
-
-            // Hydraulic Cylinder Body (Dark Teal) & Chrome Rod (Silver)
-            val cylBodyStart = Offset(center.x - slideHalfPx * 0.8f, hitchY + 4f)
-            val cylBodyEnd = Offset(center.x, hitchY + 4f)
-            val cylRodEnd = Offset(toolbarCenterX, hitchY + 4f)
-
-            drawLine(color = Color(0xFF006064), start = cylBodyStart, end = cylBodyEnd, strokeWidth = 4f)
-            drawLine(color = Color(0xFFE0F7FA), start = cylBodyEnd, end = cylRodEnd, strokeWidth = 2.5f)
-
-            // Sliding Carriage Box
-            drawRect(
-                color = Color(0xFF00E5FF),
-                topLeft = Offset(toolbarCenterX - 4f, hitchY),
-                size = Size(8f, 8f)
-            )
-
-            // Connecting stanchions from sliding carriage to Toolbar
-            drawLine(color = Color(0xFF00ACC1), start = Offset(toolbarCenterX - 6f, hitchY + 8f), end = Offset(toolbarCenterX - 6f, boomY), strokeWidth = 3.5f)
-            drawLine(color = Color(0xFF00ACC1), start = Offset(toolbarCenterX + 6f, hitchY + 8f), end = Offset(toolbarCenterX + 6f, boomY), strokeWidth = 3.5f)
-        } else if (offsetPx > 1f) {
-            drawLine(color = Color(0xFF37474F), start = leftQuickHitchPoint, end = Offset(leftQuickHitchPoint.x, boomY), strokeWidth = 4f)
-            drawLine(color = Color(0xFF37474F), start = rightQuickHitchPoint, end = Offset(rightQuickHitchPoint.x, boomY), strokeWidth = 4f)
-            drawLine(color = Color(0xFF455A64), start = Offset(center.x, hitchY), end = Offset(center.x, boomY), strokeWidth = 3f)
-        }
-
-        // 5. Heavy Square-Tube Toolbar (Shifted laterally by sliding hitch)
-        val halfToolWidthPx = (implementConfig.toolWidth * 0.5 * pixelsPerMeter).toFloat()
-        val toolbarLeft = Offset(toolbarCenterX - halfToolWidthPx, boomY)
-        val toolbarRight = Offset(toolbarCenterX + halfToolWidthPx, boomY)
-
-        drawLine(
-            color = Color(0xFF263238),
-            start = toolbarLeft,
-            end = toolbarRight,
-            strokeWidth = 7f,
-            cap = StrokeCap.Square
-        )
-    } else {
-        // --- TRAILING TOOLBAR WITH DRAWBAR TONGUE ---
-        val hitchPin = Offset(center.x, hitchY)
-        drawLine(color = Color(0xFF37474F), start = center, end = hitchPin, strokeWidth = 3.5f)
-
-        if (isHitchEnabled) {
-            // Drawbar Slide Cylinder
-            val slideHalfPx = 20f
-            drawLine(color = Color(0xFF1E282C), start = Offset(center.x - slideHalfPx, hitchY), end = Offset(center.x + slideHalfPx, hitchY), strokeWidth = 6f)
-            drawLine(color = Color(0xFF006064), start = Offset(center.x - slideHalfPx * 0.8f, hitchY), end = Offset(center.x, hitchY), strokeWidth = 3.5f)
-            drawLine(color = Color(0xFFE0F7FA), start = Offset(center.x, hitchY), end = Offset(toolbarCenterX, hitchY), strokeWidth = 2.5f)
-            drawCircle(color = Color(0xFF00E5FF), radius = 3.5f, center = Offset(toolbarCenterX, hitchY))
-        }
-
-        // Tongue to toolbar
-        val halfTongueSpread = (implementConfig.toolWidth * 0.2 * pixelsPerMeter).toFloat().coerceAtLeast(15f)
-        val tongueOrigin = if (isHitchEnabled) Offset(toolbarCenterX, hitchY) else hitchPin
-        drawLine(color = Color(0xFF455A64), start = tongueOrigin, end = Offset(toolbarCenterX - halfTongueSpread, boomY), strokeWidth = 3f)
-        drawLine(color = Color(0xFF455A64), start = tongueOrigin, end = Offset(toolbarCenterX + halfTongueSpread, boomY), strokeWidth = 3f)
-
-        // Trailing toolbar bar
-        val halfToolWidthPx = (implementConfig.toolWidth * 0.5 * pixelsPerMeter).toFloat()
-        drawLine(
-            color = Color(0xFF37474F),
-            start = Offset(toolbarCenterX - halfToolWidthPx, boomY),
-            end = Offset(toolbarCenterX + halfToolWidthPx, boomY),
-            strokeWidth = 5f,
-            cap = StrokeCap.Round
-        )
-
-        // Trailing gauge tires
-        val wheelLeft = Offset(toolbarCenterX - halfToolWidthPx * 0.6f, boomY + 5f)
-        val wheelRight = Offset(toolbarCenterX + halfToolWidthPx * 0.6f, boomY + 5f)
-        drawCircle(color = Color(0xFF212121), radius = 4f, center = wheelLeft)
-        drawCircle(color = Color(0xFF212121), radius = 4f, center = wheelRight)
-    }
-
-    // Boom Sections with active application spray nozzles (Shifted with toolbar)
-    val spans = implementConfig.getSectionSpans()
-    for (i in spans.indices) {
-        val (leftOffset, rightOffset) = spans[i]
-        val leftX = toolbarCenterX + (leftOffset * pixelsPerMeter).toFloat()
-        val rightX = toolbarCenterX + (rightOffset * pixelsPerMeter).toFloat()
-        val active = sectionStates.getOrElse(i) { false }
-        val sectionColor = if (active) Color(0xFF00E676) else Color(0xFFFF5252)
-
-        drawLine(
-            color = sectionColor,
-            start = Offset(leftX, boomY),
-            end = Offset(rightX, boomY),
-            strokeWidth = 4f,
-            cap = StrokeCap.Round
-        )
-
-        // Spray Nozzles and Droplet Mist
-        if (active) {
-            val numNozzles = 4
-            for (n in 0..numNozzles) {
-                val nozzleX = leftX + (rightX - leftX) * (n.toFloat() / numNozzles)
-                drawCircle(
-                    color = Color(0xFF80D8FF),
-                    radius = 2.5f,
-                    center = Offset(nozzleX, boomY + 3f)
-                )
-                drawLine(
-                    color = Color(0x6640C4FF),
-                    start = Offset(nozzleX, boomY + 3f),
-                    end = Offset(nozzleX + (n % 3 - 1) * 2f, boomY + 10f),
-                    strokeWidth = 1.5f
-                )
-            }
-        }
-    }
-
-    // Secondary GPS Antenna Mounted on Implement Toolbar
-    if (isHitchEnabled) {
-        val secAntennaAheadPx = (slidingHitchConfig.antennaOffsetAheadMeters * pixelsPerMeter).toFloat()
-        val secAntennaLateralPx = (slidingHitchConfig.antennaLateralOffsetMeters * pixelsPerMeter).toFloat()
-        val secAntennaPos = Offset(toolbarCenterX + secAntennaLateralPx, boomY - secAntennaAheadPx)
-
-        // Outer beacon halo ring
-        drawCircle(
-            color = Color(0x8800E5FF),
-            radius = 6.5f,
-            center = secAntennaPos,
-            style = Stroke(width = 1.5f)
-        )
-        // Yellow GNSS Receiver puck
-        drawCircle(
-            color = Color(0xFFFFD600),
-            radius = 4.0f,
-            center = secAntennaPos
-        )
-        drawCircle(
-            color = Color(0xFF004D40),
-            radius = 1.8f,
-            center = secAntennaPos
-        )
-
-        // Implement Forward Guidance Laser Reference (Shows true implement cutting path)
-        if (slidingHitchConfig.isAutoHitchEngaged) {
-            drawLine(
-                color = Color(0xAA00E5FF),
-                start = secAntennaPos,
-                end = Offset(secAntennaPos.x, secAntennaPos.y - 35f),
-                strokeWidth = 1.5f
-            )
-        }
-    }
-}
-
-private fun DrawScope.drawCompass(
-    center: Offset,
-    headingDeg: Double,
-    isHeadUpMode: Boolean
-) {
-    val radius = 22.dp.toPx()
-    drawCircle(
-        color = Color(0xDD1E2822),
-        radius = radius,
-        center = center
-    )
-    drawCircle(
-        color = Color(0xFF37474F),
-        radius = radius,
-        center = center,
-        style = Stroke(width = 1.5f)
-    )
-
-    val needleRotation = if (isHeadUpMode) -headingDeg.toFloat() else 0f
-    withTransform({
-        rotate(degrees = needleRotation, pivot = center)
-    }) {
-        val northPath = Path().apply {
-            moveTo(center.x, center.y - radius * 0.8f)
-            lineTo(center.x - radius * 0.35f, center.y)
-            lineTo(center.x + radius * 0.35f, center.y)
-            close()
-        }
-        drawPath(path = northPath, color = Color(0xFFFF5252), style = Fill)
-
-        val southPath = Path().apply {
-            moveTo(center.x, center.y + radius * 0.8f)
-            lineTo(center.x - radius * 0.35f, center.y)
-            lineTo(center.x + radius * 0.35f, center.y)
-            close()
-        }
-        drawPath(path = southPath, color = Color(0xFFB0BEC5), style = Fill)
     }
 }

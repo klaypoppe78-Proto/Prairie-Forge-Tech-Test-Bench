@@ -36,7 +36,7 @@ fun UdpHardwareDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "AgOpenGPS UDP Network Monitor",
+                    text = "Sentinel Guidance UDP Network Monitor",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Black
                 )

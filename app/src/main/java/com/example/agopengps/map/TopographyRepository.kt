@@ -62,9 +62,9 @@ class TerrainSquare(
     val maxY: Double = centerLocal.y + halfExtent
     val cellSpacing: Double = extentMeters / (gridDim - 1)
 
-    // Geographic bounding box
-    val nwGeo: GeoPoint = GeoUtils.localMetersToGeo(Vec2(minX, maxY), centerGeo)
-    val seGeo: GeoPoint = GeoUtils.localMetersToGeo(Vec2(maxX, minY), centerGeo)
+    // Geographic bounding box centered on centerGeo
+    val nwGeo: GeoPoint = GeoUtils.localMetersToGeo(Vec2(-halfExtent, halfExtent), centerGeo)
+    val seGeo: GeoPoint = GeoUtils.localMetersToGeo(Vec2(halfExtent, -halfExtent), centerGeo)
     val minLon: Double = min(nwGeo.longitude, seGeo.longitude)
     val maxLon: Double = max(nwGeo.longitude, seGeo.longitude)
     val minLat: Double = min(nwGeo.latitude, seGeo.latitude)
@@ -84,7 +84,10 @@ class TerrainSquare(
     val minElevationFeetMsl: Double get() = minElevationMslMeters * METERS_TO_FEET
     val maxElevationFeetMsl: Double get() = maxElevationMslMeters * METERS_TO_FEET
 
-    val contours: MutableList<TerrainContour> = mutableListOf()
+    @Volatile
+    var contours: List<TerrainContour> = emptyList()
+        private set
+    @Volatile
     var isLiveDemLoaded: Boolean = false
         private set
 
@@ -121,17 +124,17 @@ class TerrainSquare(
         val gradX = sin(regionalSlopeAngle) * regionalGradient
         val gradY = cos(regionalSlopeAngle) * regionalGradient
 
-        // Subtle undulating farmland contours
+        // Subtle undulating farmland contours (anchored globally so contours never jump or rotate when moving)
         val waveLen1 = 520.0 // Primary gentle rolling swell
         val waveLen2 = 280.0 // Minor terrace
 
         for (row in 0 until gridDim) {
             val y = minY + row * cellSpacing
-            val dy = y - centerLocal.y
+            val dy = y // Globally anchored to world coordinates
 
             for (col in 0 until gridDim) {
                 val x = minX + col * cellSpacing
-                val dx = x - centerLocal.x
+                val dx = x // Globally anchored to world coordinates
 
                 // 1. Regional planar slope
                 val regionalZ = (dx * gradX) + (dy * gradY)
@@ -173,9 +176,10 @@ class TerrainSquare(
 
     /**
      * Generates topographic contour lines across the 0.5 mi x 0.5 mi square at 5-foot intervals.
+     * Builds into a fresh immutable list and swaps the volatile reference atomically for lock-free UI reads.
      */
     fun generateContours() {
-        contours.clear()
+        val built = ArrayList<TerrainContour>(32)
         val minFt = floor(minElevationFeetMsl / 5.0) * 5.0
         val maxFt = ceil(maxElevationFeetMsl / 5.0) * 5.0
 
@@ -189,7 +193,7 @@ class TerrainSquare(
 
             for (path in mergedPaths) {
                 if (path.size >= 2) {
-                    contours.add(
+                    built.add(
                         TerrainContour(
                             elevationFeetMsl = targetFt,
                             elevationMetersMsl = targetMeters,
@@ -202,6 +206,7 @@ class TerrainSquare(
 
             targetFt += 5.0
         }
+        contours = built
     }
 
     /**
@@ -325,11 +330,11 @@ class TerrainSquare(
     }
 
     /**
-     * Bilinear interpolation of ground elevation at any local coordinate.
+     * Bilinear interpolation of ground elevation at any local coordinate (zero-allocation primitive overload).
      */
-    fun getElevationAt(pos: Vec2): Double {
-        val colF = ((pos.x - minX) / cellSpacing).coerceIn(0.0, (gridDim - 1.0001))
-        val rowF = ((pos.y - minY) / cellSpacing).coerceIn(0.0, (gridDim - 1.0001))
+    fun getElevationAt(x: Double, y: Double): Double {
+        val colF = ((x - minX) / cellSpacing).coerceIn(0.0, (gridDim - 1.0001))
+        val rowF = ((y - minY) / cellSpacing).coerceIn(0.0, (gridDim - 1.0001))
 
         val c0 = colF.toInt()
         val r0 = rowF.toInt()
@@ -351,14 +356,19 @@ class TerrainSquare(
     }
 
     /**
-     * Calculates terrain gradient (dZ/dx, dZ/dy) at any local coordinate.
+     * Bilinear interpolation of ground elevation at any local coordinate.
+     */
+    fun getElevationAt(pos: Vec2): Double = getElevationAt(pos.x, pos.y)
+
+    /**
+     * Calculates terrain gradient (dZ/dx, dZ/dy) at any local coordinate without temporary Vec2 allocations.
      */
     fun getSlopeGradient(pos: Vec2): Vec2 {
         val delta = 2.0 // 2-meter sampling step
-        val zEast = getElevationAt(Vec2(pos.x + delta, pos.y))
-        val zWest = getElevationAt(Vec2(pos.x - delta, pos.y))
-        val zNorth = getElevationAt(Vec2(pos.x, pos.y + delta))
-        val zSouth = getElevationAt(Vec2(pos.x, pos.y - delta))
+        val zEast = getElevationAt(pos.x + delta, pos.y)
+        val zWest = getElevationAt(pos.x - delta, pos.y)
+        val zNorth = getElevationAt(pos.x, pos.y + delta)
+        val zSouth = getElevationAt(pos.x, pos.y - delta)
 
         val dzdx = (zEast - zWest) / (2.0 * delta)
         val dzdy = (zNorth - zSouth) / (2.0 * delta)
@@ -441,11 +451,14 @@ class TopographyRepository {
                 val grid = fetchDemGrid(square.minLon, square.minLat, square.maxLon, square.maxLat, square.gridDim)
                 if (grid != null) {
                     demMemoryCache[square.cacheKey] = grid
-                    withContext(Dispatchers.Main) {
+                    // Compute marching-squares contours on background Default dispatcher (never block UI/Main thread)
+                    withContext(Dispatchers.Default) {
                         square.applyElevations(grid, isLive = true)
                     }
                     Log.d(TAG, "Successfully loaded live DEM grid for ${square.cacheKey}")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "DEM fetch skipped or network unavailable: ${e.message}")
             }
@@ -469,7 +482,7 @@ class TopographyRepository {
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 connectTimeout = 1500
                 readTimeout = 2500
-                setRequestProperty("User-Agent", "AgSteer-PrecisionAg/1.0 (Android; Precision Agriculture Steering)")
+                setRequestProperty("User-Agent", "SentinelGuidance-PrecisionAg/1.0 (Android; Precision Agriculture Steering)")
             }
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 conn.inputStream.use { stream ->
@@ -522,16 +535,25 @@ class TopographyRepository {
         currentGeoPos: GeoPoint,
         forceReload: Boolean = false
     ): TerrainSquare {
+        // Snap center to 400-meter discrete grid increments so the 0.5-mile square remains rock solid
+        val snappedX = round(currentLocalPos.x / 400.0) * 400.0
+        val snappedY = round(currentLocalPos.y / 400.0) * 400.0
+        val snappedCenterLocal = Vec2(snappedX, snappedY)
+        val snappedCenterGeo = GeoUtils.localMetersToGeo(
+            Vec2(snappedX - currentLocalPos.x, snappedY - currentLocalPos.y),
+            currentGeoPos
+        )
+
         val current = activeSquare
-        val geoDist = if (current != null) GeoUtils.distanceBetweenMeters(currentGeoPos, current.centerGeo) else Double.MAX_VALUE
-        if (!forceReload && current != null && geoDist < 200.0) {
+        val localDist = if (current != null) current.centerLocal.distanceTo(snappedCenterLocal) else Double.MAX_VALUE
+        if (!forceReload && current != null && localDist < 250.0) {
             return current
         }
 
         val baseAlt = if (currentGeoPos.altitude > 10.0) currentGeoPos.altitude else 317.0
         val newSquare = TerrainSquare(
-            centerLocal = currentLocalPos,
-            centerGeo = currentGeoPos,
+            centerLocal = snappedCenterLocal,
+            centerGeo = snappedCenterGeo,
             baseElevationMeters = baseAlt,
             repository = this
         )
@@ -540,6 +562,14 @@ class TopographyRepository {
     }
 
     fun getActiveSquare(): TerrainSquare? = activeSquare
+
+    fun cancelPendingFetches() {
+        scope.coroutineContext.cancelChildren()
+    }
+
+    fun shutdown() {
+        scope.cancel()
+    }
 
     fun clear() {
         activeSquare = null

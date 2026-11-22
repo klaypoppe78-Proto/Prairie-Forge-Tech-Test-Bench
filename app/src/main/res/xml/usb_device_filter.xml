@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Teensy 4.1 USB Serial (VID 0x16C0, PID 0x0483) -->
+    <usb-device vendor-id="5824" product-id="1155" />
+    <!-- Standard CDC-ACM USB Serial Adapters -->
+    <usb-device class="2" />
+    <!-- FTDI, CH340, CP2102, Prolific USB-Serial -->
+    <usb-device vendor-id="1027" />
+    <usb-device vendor-id="6790" />
+    <usb-device vendor-id="4292" />
+</resources>

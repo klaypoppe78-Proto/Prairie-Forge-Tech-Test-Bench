@@ -106,29 +106,29 @@ fun VirtualCabDriveOverlay(
                     .clip(CircleShape)
                     .background(Color(0xFF1E2824))
                     .border(4.dp, if (isAutoSteerEngaged) Color(0xFF00E676) else Color(0xFF78909C), CircleShape)
-                    .pointerInput(isAutoSteerEngaged) {
-                        if (!isAutoSteerEngaged) {
-                            detectDragGestures(
-                                onDragStart = { isTouchingWheel = true },
-                                onDragEnd = {
-                                    isTouchingWheel = false
-                                    dragSteerAngle = 0.0
-                                    onManualSteerRelease()
-                                },
-                                onDragCancel = {
-                                    isTouchingWheel = false
-                                    dragSteerAngle = 0.0
-                                    onManualSteerRelease()
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    // Horizontal drag steers left/right
-                                    dragSteerAngle = (dragSteerAngle + (dragAmount.x * 0.4))
-                                        .coerceIn(-maxSteerDeg, maxSteerDeg)
-                                    onManualSteerChange(dragSteerAngle)
-                                }
-                            )
-                        }
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { 
+                                isTouchingWheel = true 
+                            },
+                            onDragEnd = {
+                                isTouchingWheel = false
+                                dragSteerAngle = 0.0
+                                onManualSteerRelease()
+                            },
+                            onDragCancel = {
+                                isTouchingWheel = false
+                                dragSteerAngle = 0.0
+                                onManualSteerRelease()
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                // Horizontal drag steers left/right
+                                dragSteerAngle = (dragSteerAngle + (dragAmount.x * 0.4))
+                                    .coerceIn(-maxSteerDeg, maxSteerDeg)
+                                onManualSteerChange(dragSteerAngle)
+                            }
+                        )
                     },
                 contentAlignment = Alignment.Center
             ) {

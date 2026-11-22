@@ -67,6 +67,11 @@ class AgUdpManager(
     private var txSocket: DatagramSocket? = null
     private var isRunning = false
     private var rxJob: Job? = null
+    private var txScope: CoroutineScope? = null
+    @Volatile
+    private var cachedBroadcastIp: String? = null
+    @Volatile
+    private var cachedBroadcastAddress: InetAddress? = null
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
     private val _stats = MutableStateFlow(
@@ -97,6 +102,8 @@ class AgUdpManager(
     fun start(scope: CoroutineScope) {
         if (isRunning) return
         isRunning = true
+        txScope?.cancel()
+        txScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         rxJob = scope.launch(Dispatchers.IO) {
             try {
@@ -107,6 +114,7 @@ class AgUdpManager(
                 txSocket = DatagramSocket().apply {
                     broadcast = true
                 }
+                resolveBroadcastAddress()
 
                 _stats.value = _stats.value.copy(
                     isListening = true,
@@ -114,7 +122,7 @@ class AgUdpManager(
                     outgoingPort = outgoingPort,
                     broadcastIp = broadcastIp
                 )
-                Log.d(TAG, "AgOpenGPS / AgIO UDP listener started on port $incomingPort")
+                Log.d(TAG, "Sentinel Guidance / AgIO UDP listener started on port $incomingPort")
 
                 val buffer = ByteArray(2048)
                 val packet = DatagramPacket(buffer, buffer.size)
@@ -234,8 +242,20 @@ class AgUdpManager(
         }
     }
 
+    private fun resolveBroadcastAddress(): InetAddress {
+        val currentIp = broadcastIp
+        val existing = cachedBroadcastAddress
+        if (existing != null && cachedBroadcastIp == currentIp) {
+            return existing
+        }
+        val resolved = InetAddress.getByName(currentIp)
+        cachedBroadcastIp = currentIp
+        cachedBroadcastAddress = resolved
+        return resolved
+    }
+
     /**
-     * Transmits AgOpenGPS PGN 254 (0xFE) Steer Data packet.
+     * Transmits PGN 254 (0xFE) Steer Data packet asynchronously on Dispatchers.IO.
      */
     fun sendSteerCommand(
         targetSteerAngleDeg: Double,
@@ -245,51 +265,53 @@ class AgUdpManager(
         sectionStates: List<Boolean>
     ) {
         if (!isRunning) return
-        try {
-            val steerScaled = (targetSteerAngleDeg * 100.0).roundToInt().toShort()
-            val speedScaled = (speedKmh * 10.0).roundToInt().coerceIn(0, 255).toByte()
+        val steerScaled = (targetSteerAngleDeg * 100.0).roundToInt().toShort()
+        val speedScaled = (speedKmh * 10.0).roundToInt().coerceIn(0, 255).toByte()
 
-            var sectionBitmask = 0
-            for (i in 0 until minOf(8, sectionStates.size)) {
-                if (sectionStates[i]) {
-                    sectionBitmask = sectionBitmask or (1 shl i)
-                }
+        var sectionBitmask = 0
+        for (i in 0 until minOf(8, sectionStates.size)) {
+            if (sectionStates[i]) {
+                sectionBitmask = sectionBitmask or (1 shl i)
             }
+        }
 
-            val packetData = ByteArray(14)
-            packetData[0] = 0x80.toByte()
-            packetData[1] = 0x81.toByte()
-            packetData[2] = 0x7F.toByte() // Source: Android Tablet
-            packetData[3] = 0xFE.toByte() // PGN 254: AutoSteer Data
-            packetData[4] = 0x08.toByte() // Length
+        val packetData = ByteArray(14)
+        packetData[0] = 0x80.toByte()
+        packetData[1] = 0x81.toByte()
+        packetData[2] = 0x7F.toByte() // Source: Android Tablet
+        packetData[3] = 0xFE.toByte() // PGN 254: AutoSteer Data
+        packetData[4] = 0x08.toByte() // Length
 
-            packetData[5] = ((steerScaled.toInt() shr 8) and 0xFF).toByte()
-            packetData[6] = (steerScaled.toInt() and 0xFF).toByte()
-            packetData[7] = if (isEngaged) 0x01.toByte() else 0x00.toByte()
-            packetData[8] = sectionBitmask.toByte()
-            packetData[9] = speedScaled
+        packetData[5] = ((steerScaled.toInt() shr 8) and 0xFF).toByte()
+        packetData[6] = (steerScaled.toInt() and 0xFF).toByte()
+        packetData[7] = if (isEngaged) 0x01.toByte() else 0x00.toByte()
+        packetData[8] = sectionBitmask.toByte()
+        packetData[9] = speedScaled
 
-            val distShort = crossTrackErrorMm.toShort()
-            packetData[10] = ((distShort.toInt() shr 8) and 0xFF).toByte()
-            packetData[11] = (distShort.toInt() and 0xFF).toByte()
+        val distShort = crossTrackErrorMm.toShort()
+        packetData[10] = ((distShort.toInt() shr 8) and 0xFF).toByte()
+        packetData[11] = (distShort.toInt() and 0xFF).toByte()
 
-            var checksum = 0
-            for (i in 2..11) {
-                checksum += packetData[i].toInt() and 0xFF
+        var checksum = 0
+        for (i in 2..11) {
+            checksum += packetData[i].toInt() and 0xFF
+        }
+        packetData[12] = (checksum and 0xFF).toByte()
+        packetData[13] = 0x00.toByte()
+
+        txScope?.launch {
+            try {
+                val targetAddress = resolveBroadcastAddress()
+                val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
+                txSocket?.send(dPacket)
+
+                _stats.value = _stats.value.copy(
+                    txPacketCount = _stats.value.txPacketCount + 1,
+                    pgn254TxCount = _stats.value.pgn254TxCount + 1
+                )
+            } catch (e: Exception) {
+                if (isRunning) Log.w(TAG, "Error sending UDP steer command", e)
             }
-            packetData[12] = (checksum and 0xFF).toByte()
-            packetData[13] = 0x00.toByte()
-
-            val targetAddress = InetAddress.getByName(broadcastIp)
-            val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
-            txSocket?.send(dPacket)
-
-            _stats.value = _stats.value.copy(
-                txPacketCount = _stats.value.txPacketCount + 1,
-                pgn254TxCount = _stats.value.pgn254TxCount + 1
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Error sending UDP steer command", e)
         }
     }
 
@@ -326,21 +348,27 @@ class AgUdpManager(
             packetData[12] = (checksum and 0xFF).toByte()
             packetData[13] = 0x00.toByte()
 
-            val targetAddress = InetAddress.getByName(broadcastIp)
-            val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
-            txSocket?.send(dPacket)
+            txScope?.launch {
+                try {
+                    val targetAddress = resolveBroadcastAddress()
+                    val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
+                    txSocket?.send(dPacket)
 
-            val timeStr = timeFormat.format(Date())
-            val hex = packetData.joinToString(" ") { "%02X".format(it) }
-            logPgn("TX", 0xFC, "Steer Settings (PGN 252)", packetData.size, hex, timeStr)
-            _stats.value = _stats.value.copy(txPacketCount = _stats.value.txPacketCount + 1)
+                    val timeStr = timeFormat.format(Date())
+                    val hex = packetData.joinToString(" ") { "%02X".format(it) }
+                    logPgn("TX", 0xFC, "Steer Settings (PGN 252)", packetData.size, hex, timeStr)
+                    _stats.value = _stats.value.copy(txPacketCount = _stats.value.txPacketCount + 1)
+                } catch (e: Exception) {
+                    if (isRunning) Log.w(TAG, "Error sending PGN 252", e)
+                }
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Error sending PGN 252", e)
+            Log.w(TAG, "Error preparing PGN 252", e)
         }
     }
 
     /**
-     * Transmits AgOpenGPS PGN 250 (0xFA) Steer Configuration packet for Dual-Solenoid / Danfoss Proportional Valves.
+     * Transmits PGN 250 (0xFA) Steer Configuration packet for Dual-Solenoid / Danfoss Proportional Valves.
      */
     fun sendSteerConfig(valveConfig: SteerValveConfig) {
         if (!isRunning) return
@@ -377,21 +405,27 @@ class AgUdpManager(
             packetData[12] = (checksum and 0xFF).toByte()
             packetData[13] = 0x00.toByte()
 
-            val targetAddress = InetAddress.getByName(broadcastIp)
-            val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
-            txSocket?.send(dPacket)
+            txScope?.launch {
+                try {
+                    val targetAddress = resolveBroadcastAddress()
+                    val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
+                    txSocket?.send(dPacket)
 
-            val timeStr = timeFormat.format(Date())
-            val hex = packetData.joinToString(" ") { "%02X".format(it) }
-            logPgn("TX", 0xFA, "Steer Config (PGN 250)", packetData.size, hex, timeStr)
-            _stats.value = _stats.value.copy(txPacketCount = _stats.value.txPacketCount + 1)
+                    val timeStr = timeFormat.format(Date())
+                    val hex = packetData.joinToString(" ") { "%02X".format(it) }
+                    logPgn("TX", 0xFA, "Steer Config (PGN 250)", packetData.size, hex, timeStr)
+                    _stats.value = _stats.value.copy(txPacketCount = _stats.value.txPacketCount + 1)
+                } catch (e: Exception) {
+                    if (isRunning) Log.w(TAG, "Error sending PGN 250 over UDP", e)
+                }
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Error sending PGN 250 over UDP", e)
+            Log.w(TAG, "Error preparing PGN 250 over UDP", e)
         }
     }
 
     /**
-     * Transmits AgOpenGPS PGN 239 (0xEF) Machine Control / Section Data packet.
+     * Transmits PGN 239 (0xEF) Machine Control / Section Data packet asynchronously on Dispatchers.IO.
      */
     fun sendMachineData(
         sections1To8: Int,
@@ -399,38 +433,40 @@ class AgUdpManager(
         hydraulicLift: Int
     ) {
         if (!isRunning) return
-        try {
-            val packetData = ByteArray(14)
-            packetData[0] = 0x80.toByte()
-            packetData[1] = 0x81.toByte()
-            packetData[2] = 0x7F.toByte()
-            packetData[3] = 0xEF.toByte() // PGN 239: Machine Data
-            packetData[4] = 0x08.toByte()
-            packetData[5] = sections1To8.toByte()
-            packetData[6] = sections9To16.toByte()
-            packetData[7] = hydraulicLift.toByte()
-            packetData[8] = 0x00.toByte()
-            packetData[9] = 0x00.toByte()
-            packetData[10] = 0x00.toByte()
-            packetData[11] = 0x00.toByte()
+        val packetData = ByteArray(14)
+        packetData[0] = 0x80.toByte()
+        packetData[1] = 0x81.toByte()
+        packetData[2] = 0x7F.toByte()
+        packetData[3] = 0xEF.toByte() // PGN 239: Machine Data
+        packetData[4] = 0x08.toByte()
+        packetData[5] = sections1To8.toByte()
+        packetData[6] = sections9To16.toByte()
+        packetData[7] = hydraulicLift.toByte()
+        packetData[8] = 0x00.toByte()
+        packetData[9] = 0x00.toByte()
+        packetData[10] = 0x00.toByte()
+        packetData[11] = 0x00.toByte()
 
-            var checksum = 0
-            for (i in 2..11) {
-                checksum += packetData[i].toInt() and 0xFF
+        var checksum = 0
+        for (i in 2..11) {
+            checksum += packetData[i].toInt() and 0xFF
+        }
+        packetData[12] = (checksum and 0xFF).toByte()
+        packetData[13] = 0x00.toByte()
+
+        txScope?.launch {
+            try {
+                val targetAddress = resolveBroadcastAddress()
+                val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
+                txSocket?.send(dPacket)
+
+                _stats.value = _stats.value.copy(
+                    txPacketCount = _stats.value.txPacketCount + 1,
+                    pgn239TxCount = _stats.value.pgn239TxCount + 1
+                )
+            } catch (e: Exception) {
+                if (isRunning) Log.w(TAG, "Error sending PGN 239", e)
             }
-            packetData[12] = (checksum and 0xFF).toByte()
-            packetData[13] = 0x00.toByte()
-
-            val targetAddress = InetAddress.getByName(broadcastIp)
-            val dPacket = DatagramPacket(packetData, packetData.size, targetAddress, outgoingPort)
-            txSocket?.send(dPacket)
-
-            _stats.value = _stats.value.copy(
-                txPacketCount = _stats.value.txPacketCount + 1,
-                pgn239TxCount = _stats.value.pgn239TxCount + 1
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Error sending PGN 239", e)
         }
     }
 
@@ -439,18 +475,20 @@ class AgUdpManager(
      */
     fun sendRawNmeaSentence(sentence: String) {
         if (!isRunning) return
-        try {
-            val formatted = if (sentence.endsWith("\r\n")) sentence else "$sentence\r\n"
-            val bytes = formatted.toByteArray(Charsets.US_ASCII)
-            val targetAddress = InetAddress.getByName(broadcastIp)
-            val dPacket = DatagramPacket(bytes, bytes.size, targetAddress, outgoingPort)
-            txSocket?.send(dPacket)
+        val formatted = if (sentence.endsWith("\r\n")) sentence else "$sentence\r\n"
+        val bytes = formatted.toByteArray(Charsets.US_ASCII)
+        txScope?.launch {
+            try {
+                val targetAddress = resolveBroadcastAddress()
+                val dPacket = DatagramPacket(bytes, bytes.size, targetAddress, outgoingPort)
+                txSocket?.send(dPacket)
 
-            _stats.value = _stats.value.copy(
-                txPacketCount = _stats.value.txPacketCount + 1
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Error sending raw sentence over UDP", e)
+                _stats.value = _stats.value.copy(
+                    txPacketCount = _stats.value.txPacketCount + 1
+                )
+            } catch (e: Exception) {
+                if (isRunning) Log.w(TAG, "Error sending raw sentence over UDP", e)
+            }
         }
     }
 
@@ -464,6 +502,11 @@ class AgUdpManager(
     fun stop() {
         isRunning = false
         rxJob?.cancel()
+        rxJob = null
+        txScope?.cancel()
+        txScope = null
+        cachedBroadcastAddress = null
+        cachedBroadcastIp = null
         rxSocket?.close()
         txSocket?.close()
         rxSocket = null

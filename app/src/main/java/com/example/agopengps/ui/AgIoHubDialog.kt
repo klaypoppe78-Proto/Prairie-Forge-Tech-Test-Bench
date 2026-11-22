@@ -517,7 +517,7 @@ private fun NetworkSetupTab(stats: UdpNetworkStats) {
     ) {
         Text("AgIO Network Endpoint Configuration", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Text(
-            text = "AgOpenGPS communicates with in-cab hardware using high-speed UDP multicast/broadcast over Ethernet or Wi-Fi.",
+            text = "Sentinel Guidance communicates with in-cab hardware using high-speed UDP multicast/broadcast over Ethernet or Wi-Fi.",
             color = Color(0xFFB0BEC5),
             fontSize = 12.sp
         )
