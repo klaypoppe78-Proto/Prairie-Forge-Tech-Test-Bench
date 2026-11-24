@@ -10,7 +10,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.aistudio.agopengps.precision"
+        applicationId = "com.aistudio.agopengps.rktxq"
         minSdk = 24
         targetSdk = 35
         versionCode = 2
